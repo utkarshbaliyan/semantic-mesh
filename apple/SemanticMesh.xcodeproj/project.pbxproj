@@ -1,0 +1,46 @@
+// !$*UTF8*$!
+{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
+000000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/MeshModel.swift"; sourceTree = SOURCE_ROOT; };
+000000000000000000000002 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/MultipeerTransport.swift"; sourceTree = SOURCE_ROOT; };
+000000000000000000000003 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "App/SemanticMeshApp.swift"; sourceTree = SOURCE_ROOT; };
+000000000000000000000004 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/Envelope.swift"; sourceTree = SOURCE_ROOT; };
+000000000000000000000005 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/MeshEngine.swift"; sourceTree = SOURCE_ROOT; };
+000000000000000000000006 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/MessageStore.swift"; sourceTree = SOURCE_ROOT; };
+000000000000000000000007 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/MacInfo.plist"; sourceTree = SOURCE_ROOT; };
+000000000000000000000008 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/iOSInfo.plist"; sourceTree = SOURCE_ROOT; };
+000000000000000000000009 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "App/Mac.entitlements"; sourceTree = SOURCE_ROOT; };
+00000000000000000000000E = { isa = XCBuildConfiguration; name = Debug; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 5.0; }; };
+00000000000000000000000F = { isa = XCBuildConfiguration; name = Release; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 5.0; }; };
+00000000000000000000000D = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000000E,00000000000000000000000F,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000011 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SemanticMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
+000000000000000000000012 = { isa = PBXBuildFile; fileRef = 000000000000000000000001; };
+000000000000000000000013 = { isa = PBXBuildFile; fileRef = 000000000000000000000002; };
+000000000000000000000014 = { isa = PBXBuildFile; fileRef = 000000000000000000000003; };
+000000000000000000000015 = { isa = PBXBuildFile; fileRef = 000000000000000000000004; };
+000000000000000000000016 = { isa = PBXBuildFile; fileRef = 000000000000000000000005; };
+000000000000000000000017 = { isa = PBXBuildFile; fileRef = 000000000000000000000006; };
+000000000000000000000018 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000012,000000000000000000000013,000000000000000000000014,000000000000000000000015,000000000000000000000016,000000000000000000000017,); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000019 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000001A = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000001C = { isa = XCBuildConfiguration; name = Debug; buildSettings = { SDKROOT = iphoneos; PRODUCT_NAME = SemanticMesh; PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple; SWIFT_VERSION = 5.0; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; CURRENT_PROJECT_VERSION = 2; MARKETING_VERSION = 0.2.0; ENABLE_USER_SCRIPT_SANDBOXING = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; INFOPLIST_FILE = App/iOSInfo.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO;  }; };
+00000000000000000000001D = { isa = XCBuildConfiguration; name = Release; buildSettings = { SDKROOT = iphoneos; PRODUCT_NAME = SemanticMesh; PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple; SWIFT_VERSION = 5.0; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; CURRENT_PROJECT_VERSION = 2; MARKETING_VERSION = 0.2.0; ENABLE_USER_SCRIPT_SANDBOXING = YES; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; INFOPLIST_FILE = App/iOSInfo.plist; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TARGETED_DEVICE_FAMILY = 1; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO;  }; };
+00000000000000000000001B = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000001C,00000000000000000000001D,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+000000000000000000000010 = { isa = PBXNativeTarget; buildConfigurationList = 00000000000000000000001B; buildPhases = (000000000000000000000018,000000000000000000000019,00000000000000000000001A,); buildRules = (); dependencies = (); name = SemanticMesh; productName = SemanticMesh; productReference = 000000000000000000000011; productType = "com.apple.product-type.application"; };
+00000000000000000000001F = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SemanticMeshMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+000000000000000000000020 = { isa = PBXBuildFile; fileRef = 000000000000000000000001; };
+000000000000000000000021 = { isa = PBXBuildFile; fileRef = 000000000000000000000002; };
+000000000000000000000022 = { isa = PBXBuildFile; fileRef = 000000000000000000000003; };
+000000000000000000000023 = { isa = PBXBuildFile; fileRef = 000000000000000000000004; };
+000000000000000000000024 = { isa = PBXBuildFile; fileRef = 000000000000000000000005; };
+000000000000000000000025 = { isa = PBXBuildFile; fileRef = 000000000000000000000006; };
+000000000000000000000026 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000020,000000000000000000000021,000000000000000000000022,000000000000000000000023,000000000000000000000024,000000000000000000000025,); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000027 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+000000000000000000000028 = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+00000000000000000000002A = { isa = XCBuildConfiguration; name = Debug; buildSettings = { SDKROOT = macosx; PRODUCT_NAME = SemanticMeshMac; PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple.mac; SWIFT_VERSION = 5.0; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; CURRENT_PROJECT_VERSION = 2; MARKETING_VERSION = 0.2.0; ENABLE_USER_SCRIPT_SANDBOXING = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; INFOPLIST_FILE = App/MacInfo.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; CODE_SIGN_ENTITLEMENTS = App/Mac.entitlements; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; SUPPORTED_PLATFORMS = macosx;  }; };
+00000000000000000000002B = { isa = XCBuildConfiguration; name = Release; buildSettings = { SDKROOT = macosx; PRODUCT_NAME = SemanticMeshMac; PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple.mac; SWIFT_VERSION = 5.0; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = NO; CURRENT_PROJECT_VERSION = 2; MARKETING_VERSION = 0.2.0; ENABLE_USER_SCRIPT_SANDBOXING = YES; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; INFOPLIST_FILE = App/MacInfo.plist; MACOSX_DEPLOYMENT_TARGET = 14.0; CODE_SIGN_ENTITLEMENTS = App/Mac.entitlements; ENABLE_APP_SANDBOX = YES; ENABLE_HARDENED_RUNTIME = YES; SUPPORTED_PLATFORMS = macosx;  }; };
+000000000000000000000029 = { isa = XCConfigurationList; buildConfigurations = (00000000000000000000002A,00000000000000000000002B,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+00000000000000000000001E = { isa = PBXNativeTarget; buildConfigurationList = 000000000000000000000029; buildPhases = (000000000000000000000026,000000000000000000000027,000000000000000000000028,); buildRules = (); dependencies = (); name = SemanticMeshMac; productName = SemanticMeshMac; productReference = 00000000000000000000001F; productType = "com.apple.product-type.application"; };
+00000000000000000000000C = { isa = PBXGroup; children = (000000000000000000000011,00000000000000000000001F,); name = Products; sourceTree = "<group>"; };
+00000000000000000000000B = { isa = PBXGroup; children = (000000000000000000000001,000000000000000000000002,000000000000000000000003,000000000000000000000004,000000000000000000000005,000000000000000000000006,000000000000000000000007,000000000000000000000008,000000000000000000000009,00000000000000000000000C,); sourceTree = "<group>"; };
+00000000000000000000000A = { isa = PBXProject; attributes = { LastUpgradeCheck = 1600; }; buildConfigurationList = 00000000000000000000000D; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en,Base); mainGroup = 00000000000000000000000B; productRefGroup = 00000000000000000000000C; projectDirPath = ""; projectRoot = ""; targets = (000000000000000000000010,00000000000000000000001E,); };
+}; rootObject = 00000000000000000000000A; }

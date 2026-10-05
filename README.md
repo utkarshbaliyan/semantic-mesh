@@ -2,6 +2,10 @@
 
 Android phone-only offline communication prototype. The immediate goal is two-phone messaging, then three-phone relaying. No AI, LoRa, cloud, SIM, or internet permission is included.
 
+## Apple prototype
+
+For Mac↔iPhone testing, see [Apple setup and offline test instructions](apple/README.md). Apple uses a separate native transport with the same envelope. Android↔Apple interoperability is not implemented.
+
 ## Implemented
 
 - Bluetooth Classic secure RFCOMM listener and outgoing connections; nearby discovery and paired-device list.

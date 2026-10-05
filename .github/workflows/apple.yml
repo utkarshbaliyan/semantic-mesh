@@ -1,0 +1,19 @@
+name: Apple checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Protocol and routing tests
+        run: swift test --package-path apple
+      - name: Build macOS app
+        run: apple/scripts/build-mac.sh
+      - name: Verify iPhone simulator build
+        run: xcodebuild -project apple/SemanticMesh.xcodeproj -scheme SemanticMesh -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath /tmp/semanticmesh-ios CODE_SIGNING_ALLOWED=NO build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: semantic-mesh-mac
+          path: apple/output/SemanticMesh-Mac.zip
