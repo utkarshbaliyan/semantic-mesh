@@ -22,6 +22,10 @@ Use Android Studio with JDK 17 or 21 and Android SDK 35. The pinned Gradle wrapp
 
 Install `app/build/outputs/apk/debug/app-debug.apk` on Android 8+ phones. Keep the app visible and screens awake during tests. Android 8–11 require location permission and may require the system Location toggle for discovery. Android 12+ require Nearby Devices permissions.
 
+## Verification
+
+Local SDK 35 build passed: `testDebugUnitTest assembleDebug lintDebug`; five protocol tests passed, lint had no errors. Physical-device transport, storage/replay and routing acceptance tests remain unperformed. GitHub Actions repeats checks and uploads the debug APK.
+
 ## Two phones
 
 1. Disable mobile data and Wi-Fi on both phones; enable Bluetooth. Removing SIMs is an additional useful test.

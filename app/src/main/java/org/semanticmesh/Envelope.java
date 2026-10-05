@@ -16,7 +16,7 @@ final class Envelope {
         if (!kind.equals("text") && !kind.equals("ack")) throw new Exception("Invalid kind");
         if (json.getInt("hops") < 0 || json.getInt("hops") > 8) throw new Exception("Invalid hops");
         if (json.getLong("expires") <= json.getLong("created")) throw new Exception("Invalid expiry");
-        if (json.getLong("expires") - json.getLong("created") > 3600000 || json.getLong("created") > System.currentTimeMillis() + 300000) throw new Exception("Invalid lifetime or clock skew");
+        if (json.getLong("created") < 0 || json.getLong("expires") - json.getLong("created") > 3600000 || json.getLong("created") > System.currentTimeMillis() + 300000) throw new Exception("Invalid lifetime or clock skew");
         if (kind.equals("text") && (json.getString("text").trim().isEmpty() || json.getString("text").length() > 2000)) throw new Exception("Invalid text");
         if (kind.equals("ack")) UUID.fromString(json.getString("ackFor"));
         if (json.has("to")) UUID.fromString(json.getString("to"));

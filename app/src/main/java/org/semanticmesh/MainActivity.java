@@ -16,7 +16,7 @@ import org.json.JSONObject;
 @android.annotation.SuppressLint("MissingPermission")
 public final class MainActivity extends Activity implements BluetoothTransport.Listener {
     private BluetoothAdapter adapter;
-    private BluetoothTransport transport;
+    private volatile BluetoothTransport transport;
     private MessageStore store;
     private String identity;
     private LinearLayout peers;
@@ -41,7 +41,7 @@ public final class MainActivity extends Activity implements BluetoothTransport.L
         adapter=((BluetoothManager)getSystemService(BLUETOOTH_SERVICE)).getAdapter();
         LinearLayout root=new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(24,24,24,24);
         ScrollView scroll=new ScrollView(this); scroll.addView(root); setContentView(scroll);
-        TextView title=new TextView(this); title.setText("Semantic Mesh • prototype\nNode " + identity + "\nForeground only · reports are unverified"); root.addView(title);
+        TextView title=new TextView(this); title.setText(getString(R.string.node_title,identity)); root.addView(title);
         button(root,"Start / permissions",this::start);
         button(root,"Make discoverable (120 seconds)",() -> { if(ready()) { Intent i=new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE); i.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,120); startActivity(i); } });
         button(root,"Scan nearby",() -> { if(ready()) { discovered.clear(); peers.removeAllViews(); for(BluetoothDevice d:adapter.getBondedDevices()) addPeer(d); if(!adapter.startDiscovery()) status("Discovery could not start"); } });
