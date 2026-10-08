@@ -14,9 +14,9 @@ public struct Envelope: Codable, Equatable {
     public let to: String?
 
     public static func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
-    public static func message(sender: String, text: String, now: Int64 = now()) throws -> Envelope {
+    public static func message(sender: String, text: String, to: String? = nil, now: Int64 = now()) throws -> Envelope {
         let e = Envelope(v: 1, id: UUID().uuidString.lowercased(), sender: sender, kind: "text",
-                         created: now, expires: now + 3_600_000, hops: 0, text: text, ackFor: nil, to: nil)
+                         created: now, expires: now + 3_600_000, hops: 0, text: text, ackFor: nil, to: to)
         try e.validate(now: now); return e
     }
     public static func receipt(sender: String, for original: Envelope, now: Int64 = now()) throws -> Envelope {

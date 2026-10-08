@@ -120,6 +120,90 @@ final class CoreTests: TestBase {
         XCTAssertEqual(engine.store.active(now: now).count, 1)
         XCTAssertEqual(transmissions, 0)
     }
+    private func contactBook() throws -> ContactBook {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return try ContactBook(file: directory.appendingPathComponent("contacts.json"), defaultUsername: "test_user")
+    }
+    func testUsernameValidationAndNormalization() throws {
+        XCTAssertEqual(try ChatProfile.normalize("  Utkarsh_16 "), "utkarsh_16")
+        for invalid in ["ab", "1user", "a b", "über", "_user", String(repeating: "a", count: 25)] {
+            XCTAssertThrowsError(try ChatProfile.normalize(invalid), invalid)
+        }
+    }
+    func testContactsPersistAndDuplicateNamesRemainDistinct() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("contacts.json")
+        let book = try ContactBook(file: file, defaultUsername: "before")
+        let first = try ChatProfile(id: UUID().uuidString, username: "same_name")
+        let second = try ChatProfile(id: UUID().uuidString, username: "same_name")
+        try book.accept(first); try book.accept(second); try book.setUsername("after")
+        let restored = try ContactBook(file: file, defaultUsername: "unused")
+        XCTAssertEqual(restored.username, "after")
+        XCTAssertEqual(Set(restored.contacts.map(\.id)), Set([first.id, second.id]))
+        try restored.accept(try ChatProfile(id: first.id, username: "renamed"))
+        XCTAssertEqual(restored.contacts.count, 2)
+        XCTAssertEqual(restored.profile(for: first.id)?.username, "renamed")
+    }
+    func testUnacceptedWrongRecipientAndSpoofedSenderRejected() throws {
+        let book = try contactBook()
+        let local = UUID().uuidString.lowercased()
+        let profile = try ChatProfile(id: UUID().uuidString, username: "alice")
+        let e = try Envelope.message(sender: profile.id, text: "private", to: local, now: now)
+        XCTAssertFalse(book.allows(e, localIdentity: local, peerIdentity: profile.id))
+        try book.accept(profile)
+        XCTAssertTrue(book.allows(e, localIdentity: local, peerIdentity: profile.id))
+        XCTAssertFalse(book.allows(e, localIdentity: UUID().uuidString, peerIdentity: profile.id))
+        XCTAssertFalse(book.allows(e, localIdentity: local, peerIdentity: UUID().uuidString))
+        let broadcast = try Envelope.message(sender: profile.id, text: "broadcast", now: now)
+        XCTAssertFalse(book.allows(broadcast, localIdentity: local, peerIdentity: profile.id))
+    }
+    func testAuthorizationRunsBeforeStorageAndReceipt() throws {
+        let book = try contactBook()
+        let sender = try ChatProfile(id: UUID().uuidString, username: "alice")
+        let engine = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        engine.authorizeIncoming = { e, peer in book.allows(e, localIdentity: engine.identity, peerIdentity: peer) }
+        var receipts = 0
+        engine.transmit = { data, _ in if (try? Envelope.decode(data, now: self.now))?.kind == "ack" { receipts += 1 } }
+        let e = try Envelope.message(sender: sender.id, text: "only after acceptance", to: engine.identity, now: now)
+        engine.receive(try e.encoded(), from: sender.id, now: now)
+        XCTAssertTrue(engine.store.active(now: now).isEmpty); XCTAssertEqual(receipts, 0)
+        try book.accept(sender)
+        engine.receive(try e.encoded(), from: sender.id, now: now)
+        XCTAssertEqual(engine.store.active(now: now).filter { $0.kind == "text" }.count, 1)
+        XCTAssertEqual(receipts, 1)
+        engine.receive(try e.encoded(), from: sender.id, now: now)
+        XCTAssertEqual(receipts, 1)
+    }
+    func testDirectedMessagesOnlyGetDestinationReceipt() throws {
+        let a = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        let b = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        let c = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        var queue: [(MeshEngine, Data, String)] = []
+        a.transmit = { data, except in if except != "B" { queue.append((b, data, "A")) } }
+        b.transmit = { data, except in
+            if except != "A" { queue.append((a, data, "B")) }
+            if except != "C" { queue.append((c, data, "B")) }
+        }
+        c.transmit = { data, except in if except != "B" { queue.append((b, data, "C")) } }
+        try a.send(text: "for C", to: c.identity, now: now)
+        while !queue.isEmpty { let (target, data, source) = queue.removeFirst(); target.receive(data, from: source, now: now) }
+        let receipts = a.store.active(now: now).filter { $0.kind == "ack" }
+        XCTAssertEqual(receipts.count, 1); XCTAssertEqual(receipts.first?.sender, c.identity)
+        XCTAssertEqual(c.store.active(now: now).first { $0.kind == "text" }?.to, c.identity)
+    }
+    func testContactChatQueuesUntilReconnect() throws {
+        let a = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        let b = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        try a.send(text: "queued chat", to: b.identity, now: now)
+        XCTAssertTrue(b.store.active(now: now).isEmpty)
+        a.transmit = { data, _ in b.receive(data, from: a.identity, now: self.now) }
+        a.sync(now: now)
+        XCTAssertEqual(b.store.active(now: now).first { $0.kind == "text" }?.text, "queued chat")
+        XCTAssertEqual(b.store.active(now: now).first { $0.kind == "text" }?.to, b.identity)
+    }
+
 }
 
 #if CORE_CHECKS
@@ -134,10 +218,16 @@ final class CoreTests: TestBase {
             ("Persistence, dedup and expiry", checks.testPersistenceDedupAndExpiry),
             ("Three-node relay and receipts", checks.testThreeNodeRelayReceiptsAndDuplicates),
             ("Disconnected store and forward", checks.testDisconnectedStoreAndForward),
-            ("Expiry and hop-eight stop", checks.testExpiredAndHopEightNeverForwarded)
+            ("Expiry and hop-eight stop", checks.testExpiredAndHopEightNeverForwarded),
+            ("Username validation", checks.testUsernameValidationAndNormalization),
+            ("Persistent contacts and duplicate names", checks.testContactsPersistAndDuplicateNamesRemainDistinct),
+            ("Contact, recipient and sender authorization", checks.testUnacceptedWrongRecipientAndSpoofedSenderRejected),
+            ("Acceptance before storage or receipts", checks.testAuthorizationRunsBeforeStorageAndReceipt),
+            ("Directed delivery receipts", checks.testDirectedMessagesOnlyGetDestinationReceipt),
+            ("Queued contact chat", checks.testContactChatQueuesUntilReconnect)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
-        print("8 core checks passed. Physical radio delivery is not covered.")
+        print("14 core checks passed. Physical radio delivery is not covered.")
     }
 }
 #endif

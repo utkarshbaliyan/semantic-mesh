@@ -4,6 +4,23 @@ Native SwiftUI app for macOS 14+ and iOS 17+. It uses Multipeer Connectivity to 
 
 The Apple version uses the same v1 JSON envelope as Android. **The Apple and Android apps cannot connect to each other yet**: their radio transports differ. A future shared BLE or Wi-Fi transport/bridge is needed.
 
+## Usernames and contact chats (0.3.0)
+
+Update and run **both** Apple apps, then:
+
+1. Enter your username in **Your profile** and press **Save**.
+2. Press **Start network** on both devices.
+3. Search for the other username under **Find people nearby**; compare the eight-character device ID if names match.
+4. Press **Request chat** on one device. The other person chooses **Accept** or **Reject**.
+5. After acceptance and connection, select the saved contact and send text in their chat.
+6. Reconnect accepted contacts from Nearby after a restart. Messages to offline contacts queue for up to one hour.
+
+Usernames are local aliases, not globally registered accounts or login credentials. Duplicate usernames are allowed and kept separate by device UUID. There is no global search, account recovery or multi-device account synchronization. Profiles and accepted contacts persist locally; unanswered requests are live session invitations and expire.
+
+The contact UI sends only to the selected, approved session peer. It rejects messages from unaccepted contacts, mismatched sender identities and other recipients before storage or receipt generation. It also checks incoming receipts against the original outgoing message. It does **not** relay contact conversations through other devices; the original mesh engine remains available separately for broadcast/routing work. Both devices need the updated chat build; earlier broadcast-only versions will not appear in chat discovery. Session encryption is enabled, but UUIDs/usernames remain self-claimed and are not cryptographically authenticated.
+
+Fourteen core checks pass, including profile persistence, duplicate names, contact acceptance gates, recipient/source filtering, directed receipts and queued delivery. Native Mac compilation and unsigned iPhone-device compilation pass. Physical acceptance/rejection and three-device chat isolation still require device testing.
+
 ## Run on this Mac
 
 The local Apple Silicon development build is at `output/Semantic Mesh.app` (generated, not checked into Git).
@@ -54,7 +71,7 @@ Do not count the iOS Simulator as a physical peer for radio acceptance tests. Ke
 - App receipts report that another app persisted the message. They do not mean a human read it or verified its contents.
 - Encrypted sessions (`.required`) and explicit invitation approval. No end-to-end signatures, authenticated node identity, trusted groups or revocation. Nearby names and receipts may be forged.
 - Live messages are replayed upon connection and every 15 seconds. Full-store replay is deliberately simple and inefficient; per-peer inventory sync and backpressure are future work.
-- Multi-hop is application-level flooding, not a guarantee that Multipeer Connectivity exposes a chosen physical radio topology. Three-node core simulation passes; physical three-device routing is unverified.
+- Broadcast multi-hop in the core engine is application-level flooding, not a guarantee that Multipeer Connectivity exposes a chosen physical radio topology. Three-node core simulation passes; physical three-device routing is unverified.
 - The UI shows the latest 100 live text messages; the store retains up to its cap.
 - Apple's current documentation deprecates Multipeer Connectivity in favor of Network framework. This implementation is isolated so a replacement transport can retain the protocol.
 
@@ -66,6 +83,6 @@ apple/scripts/build-mac.sh      # native Mac UI + transport compilation
 swift test --package-path apple # XCTest suite; requires full Xcode with XCTest available
 ```
 
-Eight local core checks passed: Android JSON compatibility, forwarding invariants, bounds/invalid data, persistence/dedup/expiry, three-node simulated relay/receipts, disconnected forwarding, and no forwarding after expiry or hop eight. Mac compilation and development signature verification passed. Local UI automation failed; interactive launch, real wireless discovery and Mac↔iPhone delivery are unverified. The [GitHub Apple check](https://github.com/utkarshbaliyan/semantic-mesh/actions/runs/37364315123) passed the XCTest suite, Mac build and iPhone Simulator compilation. Physical iPhone installation still needs your Apple signing team.
+The original eight local core checks covered: Android JSON compatibility, forwarding invariants, bounds/invalid data, persistence/dedup/expiry, three-node simulated relay/receipts, disconnected forwarding, and no forwarding after expiry or hop eight. Mac compilation and development signature verification passed. Local UI automation failed; interactive launch, real wireless discovery and Mac↔iPhone delivery are unverified. The [GitHub Apple check](https://github.com/utkarshbaliyan/semantic-mesh/actions/runs/37364315123) passed the XCTest suite, Mac build and iPhone Simulator compilation. Physical iPhone installation still needs your Apple signing team.
 
 [Apple peer-to-peer networking](https://developer.apple.com/documentation/technotes/tn3111-ios-wifi-api-overview), [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity), [session encryption/deprecation](https://developer.apple.com/documentation/multipeerconnectivity/mcsession/encryptionpreference).

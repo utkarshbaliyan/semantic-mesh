@@ -5,19 +5,21 @@ public final class MeshEngine {
     public let identity: String
     public let store: MessageStore
     public var transmit: (Data, String?) -> Void = { _, _ in }
+    public var authorizeIncoming: (Envelope, String) -> Bool = { _, _ in true }
     public var received: (Envelope) -> Void = { _ in }
     public var error: (Error) -> Void = { _ in }
     public init(identity: String, store: MessageStore) { self.identity = identity; self.store = store }
-    public func send(text: String, now: Int64 = Envelope.now()) throws {
-        let e = try Envelope.message(sender: identity, text: text, now: now)
+    public func send(text: String, to: String? = nil, now: Int64 = Envelope.now()) throws {
+        let e = try Envelope.message(sender: identity, text: text, to: to, now: now)
         try store.insert(e, now: now); received(e); try forward(e, excluding: nil, now: now)
     }
     public func receive(_ data: Data, from peer: String, now: Int64 = Envelope.now()) {
         do {
             let e = try Envelope.decode(data, now: now)
+            guard authorizeIncoming(e, peer) else { return }
             guard try store.insert(e, now: now) else { return }
             received(e)
-            if e.kind == "text", e.sender != identity {
+            if e.kind == "text", e.sender != identity, e.to == nil || e.to == identity {
                 let ack = try Envelope.receipt(sender: identity, for: e, now: now)
                 try store.insert(ack, now: now); received(ack); try forward(ack, excluding: nil, now: now)
             }

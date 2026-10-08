@@ -8,3 +8,4 @@ apple/.build/
 apple/output/
 **/xcuserdata/
 *.xcuserstate
+**/project.xcworkspace/

@@ -4,7 +4,7 @@ Android phone-only offline communication prototype. The immediate goal is two-ph
 
 ## Apple prototype
 
-For Mac↔iPhone testing, see [Apple setup and offline test instructions](apple/README.md). Apple uses a separate native transport with the same envelope. Android↔Apple interoperability is not implemented.
+The Apple app now supports local usernames, nearby chat requests, saved contacts and directed conversations. For Mac↔iPhone testing, see [Apple setup and offline test instructions](apple/README.md). Apple uses a separate native transport with the same envelope. Android↔Apple interoperability is not implemented.
 
 ## Implemented
 
