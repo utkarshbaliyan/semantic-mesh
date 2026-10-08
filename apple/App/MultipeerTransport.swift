@@ -17,12 +17,15 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     private let browser: MCNearbyServiceBrowser
     private var approved: [MCPeerID: ChatProfile] = [:]
     private var active = false
+    private var transfers: [String: Progress] = [:]
     var discovered: (NearbyPeer) -> Void = { _ in }
     var lost: (String) -> Void = { _ in }
     var connected: (ChatProfile) -> Bool = { _ in false }
     var connectionChanged: ([ChatProfile]) -> Void = { _ in }
     var requestChanged: (String, Bool) -> Void = { _, _ in }
     var incoming: (Data, String) -> Void = { _, _ in }
+    var allowResource: (String, String) -> Bool = { _, _ in false }
+    var incomingResource: (URL, String, String) -> Void = { _, _, _ in }
     var invitation: (ChatProfile, @escaping (Bool) -> Void) -> Void = { _, reply in reply(false) }
     var status: (String) -> Void = { _ in }
 
@@ -30,13 +33,27 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         localProfile = profile
         let local = MCPeerID(displayName: "@\(profile.username)-\(profile.id.prefix(8))")
         session = MCSession(peer: local, securityIdentity: nil, encryptionPreference: .required)
-        advertiser = MCNearbyServiceAdvertiser(peer: local, discoveryInfo: ["protocol": "1", "chat": "1", "id": profile.id, "username": profile.username], serviceType: "semantic-mesh")
+        advertiser = MCNearbyServiceAdvertiser(peer: local, discoveryInfo: ["protocol": "1", "chat": "2", "id": profile.id, "username": profile.username], serviceType: "semantic-mesh")
         browser = MCNearbyServiceBrowser(peer: local, serviceType: "semantic-mesh")
         super.init()
         session.delegate = self; advertiser.delegate = self; browser.delegate = self
     }
     func start() { active = true; advertiser.startAdvertisingPeer(); browser.startBrowsingForPeers() }
-    func stop() { active = false; advertiser.stopAdvertisingPeer(); browser.stopBrowsingForPeers(); session.disconnect(); approved.removeAll() }
+    func stop() { active = false; advertiser.stopAdvertisingPeer(); browser.stopBrowsingForPeers(); transfers.values.forEach { $0.cancel() }; transfers.removeAll(); session.disconnect(); approved.removeAll() }
+    func cancelFiles() { transfers.values.forEach { $0.cancel() }; transfers.removeAll() }
+    func sendFile(_ url: URL, name: String, to identity: String) {
+        guard active, UUID(uuidString: name) != nil,
+              let peer = session.connectedPeers.first(where: { approved[$0]?.id == identity }) else { return }
+        let key = identity + ":" + name
+        guard transfers[key] == nil, transfers.count < 2 else { return }
+        let progress = session.sendResource(at: url, withName: name, toPeer: peer) { [weak self] error in
+            DispatchQueue.main.async {
+                self?.transfers.removeValue(forKey: key)
+                if let error { self?.status("Attachment transfer failed: \(error.localizedDescription). Retrying while the message is live.") }
+            }
+        }
+        if let progress { transfers[key] = progress }
+    }
     func invite(_ peer: NearbyPeer) {
         guard active, peer.id != localProfile.id, !session.connectedPeers.contains(peer.peer) else { return }
         guard let context = try? JSONEncoder().encode(Request(profile: localProfile, to: peer.id)) else { return }
@@ -63,7 +80,7 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     private func publishConnections() { connectionChanged(session.connectedPeers.compactMap { approved[$0] }) }
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "1",
+            guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "2",
                   let id = info?["id"], let username = info?["username"],
                   let profile = try? ChatProfile(id: id, username: username), profile.id != self.localProfile.id else { return }
             self.discovered(NearbyPeer(profile: profile, peer: peerID))
@@ -113,6 +130,31 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         }
     }
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { stream.close() }
-    func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) { progress.cancel() }
-    func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) { }
+    func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.active, let profile = self.approved[peerID],
+                  progress.totalUnitCount > 0, progress.totalUnitCount <= MediaVault.maxBytes,
+                  self.allowResource(resourceName, profile.id), self.transfers.count < 2 else { progress.cancel(); return }
+            self.transfers[profile.id + ":" + resourceName] = progress
+        }
+    }
+    func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let profile = self.approved[peerID] else { return }
+            self.transfers.removeValue(forKey: profile.id + ":" + resourceName)
+            if let error { self.status("Receiving attachment failed: \(error.localizedDescription)") }
+        }
+        // Multipeer deletes its temporary resource after this callback returns.
+        guard error == nil, let localURL, UUID(uuidString: resourceName) != nil,
+              let size = try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= MediaVault.maxBytes else { return }
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        do { try FileManager.default.copyItem(at: localURL, to: copy) } catch { return }
+        DispatchQueue.main.async { [weak self] in
+            defer { try? FileManager.default.removeItem(at: copy) }
+            guard let self, self.active, let profile = self.approved[peerID] else { return }
+            self.transfers.removeValue(forKey: profile.id + ":" + resourceName)
+            guard self.allowResource(resourceName, profile.id) else { return }
+            self.incomingResource(copy, resourceName, profile.id)
+        }
+    }
 }

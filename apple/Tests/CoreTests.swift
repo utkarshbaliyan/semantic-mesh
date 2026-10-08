@@ -204,6 +204,126 @@ final class CoreTests: TestBase {
         XCTAssertEqual(b.store.active(now: now).first { $0.kind == "text" }?.to, b.identity)
     }
 
+    private func featureDirectory() -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }; return directory
+    }
+    private func sampleGroup() throws -> MeshGroup {
+        let owner = try ChatProfile(id: UUID().uuidString, username: "owner")
+        let member = try ChatProfile(id: UUID().uuidString, username: "member")
+        return MeshGroup(id: UUID().uuidString.lowercased(), ownerID: owner.id, name: "Friends", revision: 1, members: [owner, member])
+    }
+    func testGroupOwnershipRevisionAndPersistence() throws {
+        let file = featureDirectory().appendingPathComponent("groups.json")
+        let book = try GroupBook(file: file); var group = try sampleGroup()
+        XCTAssertThrowsError(try book.apply(group, from: group.members[1].id))
+        try book.apply(group, from: group.ownerID)
+        var conflict = group; conflict.name = "Forged edit"
+        XCTAssertThrowsError(try book.apply(conflict, from: group.ownerID))
+        group.revision = 2; group.name = "Renamed"
+        try book.apply(group, from: group.ownerID)
+        conflict.revision = 1
+        XCTAssertThrowsError(try book.apply(conflict, from: group.ownerID))
+        var hijack = group
+        hijack = MeshGroup(id: group.id, ownerID: group.members[1].id, name: "Hijacked", revision: 3, members: group.members)
+        XCTAssertThrowsError(try book.apply(hijack, from: hijack.ownerID))
+        XCTAssertEqual(try GroupBook(file: file).group(group.id), group)
+    }
+    func testRemovedMemberAndStaleGroupTrafficRejected() throws {
+        let book = try GroupBook(file: featureDirectory().appendingPathComponent("groups.json"))
+        var group = try sampleGroup(); let removed = group.members[1].id
+        try book.apply(group, from: group.ownerID)
+        var e = try Envelope.message(sender: removed, text: "group text", to: group.ownerID, now: now)
+        e.groupID = group.id; e.groupRevision = 1
+        XCTAssertTrue(book.permits(e, local: group.ownerID, peer: removed))
+        XCTAssertFalse(book.permits(e, local: removed, peer: group.ownerID))
+        group.members.removeLast(); group.revision = 2; try book.apply(group, from: group.ownerID)
+        XCTAssertFalse(book.permits(e, local: group.ownerID, peer: removed))
+        e.groupRevision = 2
+        XCTAssertFalse(book.permits(e, local: group.ownerID, peer: removed))
+        XCTAssertTrue(book.audience(group.id).contains { $0.id == removed })
+        XCTAssertFalse(book.group(group.id)!.contains(removed))
+    }
+    func testGroupBoundsAndControlEnvelopeValidation() throws {
+        var group = try sampleGroup()
+        let update = try Envelope.groupUpdate(group, to: group.members[1].id, now: now)
+        XCTAssertEqual(try Envelope.decode(update.encoded(), now: now).group, group)
+        var forged = update; forged.groupRevision = 2
+        XCTAssertThrowsError(try forged.validate(now: now))
+        group.members.append(group.members[1]); XCTAssertThrowsError(try group.validate())
+        group = try sampleGroup(); group.name = String(repeating: "x", count: 61)
+        XCTAssertThrowsError(try group.validate())
+        group = try sampleGroup()
+        for i in 0..<15 { group.members.append(try ChatProfile(id: UUID().uuidString, username: "person_\(i)")) }
+        XCTAssertThrowsError(try group.validate())
+    }
+    func testMediaIntegrityPersistenceAndPruning() throws {
+        let directory = featureDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let source = directory.appendingPathComponent("sample.m4a")
+        try Data("fixture audio bytes".utf8).write(to: source)
+        let vault = try MediaVault(directory: directory.appendingPathComponent("media"))
+        let media = try vault.importFile(source, kind: "audio")
+        XCTAssertTrue(vault.available(media))
+        let restored = try MediaVault(directory: directory.appendingPathComponent("media"))
+        XCTAssertTrue(restored.available(media))
+        let corrupt = directory.appendingPathComponent("corrupt.m4a")
+        try Data("corrupted contents".utf8).write(to: corrupt)
+        let second = MediaDescriptor(id: UUID().uuidString.lowercased(), kind: media.kind, fileExtension: media.fileExtension, bytes: media.bytes, sha256: media.sha256)
+        XCTAssertThrowsError(try vault.install(corrupt, as: second)); XCTAssertFalse(vault.available(second))
+        let collision = MediaDescriptor(id: media.id, kind: media.kind, fileExtension: media.fileExtension, bytes: media.bytes, sha256: String(repeating: "0", count: 64))
+        XCTAssertFalse(vault.available(collision))
+        vault.prune(keeping: [media.id]); XCTAssertTrue(vault.available(media))
+        vault.prune(keeping: []); XCTAssertFalse(vault.available(media))
+    }
+    func testMediaPathSizeAndTypeBounds() throws {
+        for (ext, kind, bytes) in [("../mp3", "audio", Int64(12)), ("exe", "video", 12), ("m4a", "audio", MediaVault.maxBytes + 1), ("mp4", "video", 0)] {
+            let media = MediaDescriptor(id: UUID().uuidString, kind: kind, fileExtension: ext, bytes: bytes, sha256: String(repeating: "a", count: 64))
+            XCTAssertThrowsError(try media.validate())
+        }
+        let invalid = MediaDescriptor(id: "../../outside", kind: "audio", fileExtension: "m4a", bytes: 1, sha256: String(repeating: "a", count: 64))
+        XCTAssertThrowsError(try invalid.validate())
+    }
+    func testMediaQuotaRejectsNewFiles() throws {
+        let directory = featureDirectory(), mediaDirectory = directory.appendingPathComponent("media")
+        let vault = try MediaVault(directory: mediaDirectory)
+        let full = mediaDirectory.appendingPathComponent("quota-fixture")
+        _ = FileManager.default.createFile(atPath: full.path, contents: nil)
+        let file = try FileHandle(forWritingTo: full)
+        try file.truncate(atOffset: UInt64(MediaVault.quota)); try file.close()
+        let source = directory.appendingPathComponent("sample.mp4")
+        try Data("small fixture".utf8).write(to: source)
+        XCTAssertThrowsError(try vault.importFile(source, kind: "video"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: mediaDirectory.path).count, 1)
+    }
+    func testMediaReceiptOnlyAfterExplicitVerificationAndIsDeduplicated() throws {
+        let engine = MeshEngine(identity: UUID().uuidString.lowercased(), store: try store())
+        let media = MediaDescriptor(id: UUID().uuidString.lowercased(), kind: "video", fileExtension: "mp4", bytes: 12, sha256: String(repeating: "a", count: 64))
+        let e = try Envelope.attachment(sender: UUID().uuidString.lowercased(), media: media, to: engine.identity, now: now)
+        engine.receive(try e.encoded(), from: e.sender, now: now)
+        XCTAssertEqual(engine.store.active(now: now).filter { $0.kind == "ack" }.count, 0)
+        let ready = try Envelope.ready(sender: engine.identity, for: e, now: now)
+        XCTAssertEqual(try Envelope.decode(ready.encoded(), now: now).ackFor, e.id)
+        try engine.acknowledge(e, now: now); try engine.acknowledge(e, now: now)
+        XCTAssertEqual(engine.store.active(now: now).filter { $0.kind == "ack" }.count, 1)
+    }
+    func testGroupReceiptPreservesMembershipRevision() throws {
+        let group = try sampleGroup()
+        let receiver = MeshEngine(identity: group.members[1].id, store: try store())
+        var e = try Envelope.message(sender: group.ownerID, text: "hello members", to: receiver.identity, now: now)
+        e.groupID = group.id; e.groupRevision = group.revision
+        receiver.receive(try e.encoded(), from: e.sender, now: now)
+        let ack = receiver.store.active(now: now).first { $0.kind == "ack" }!
+        XCTAssertEqual(ack.groupID, group.id); XCTAssertEqual(ack.groupRevision, 1)
+        XCTAssertEqual(ack.to, group.ownerID)
+    }
+    func testEmojiRoundTripAndUTF16Limit() throws {
+        let text = "Hi 😀😂❤️👍🏽🎉🙏 — مرحبا"
+        let e = try Envelope.message(sender: UUID().uuidString, text: text, now: now)
+        XCTAssertEqual(try Envelope.decode(e.encoded(), now: now).text, text)
+        XCTAssertThrowsError(try Envelope.message(sender: e.sender, text: String(repeating: "😀", count: 1001), now: now))
+    }
+
 }
 
 #if CORE_CHECKS
@@ -224,10 +344,19 @@ final class CoreTests: TestBase {
             ("Contact, recipient and sender authorization", checks.testUnacceptedWrongRecipientAndSpoofedSenderRejected),
             ("Acceptance before storage or receipts", checks.testAuthorizationRunsBeforeStorageAndReceipt),
             ("Directed delivery receipts", checks.testDirectedMessagesOnlyGetDestinationReceipt),
-            ("Queued contact chat", checks.testContactChatQueuesUntilReconnect)
+            ("Queued contact chat", checks.testContactChatQueuesUntilReconnect),
+            ("Group owner, revision and persistence", checks.testGroupOwnershipRevisionAndPersistence),
+            ("Removed members and stale traffic", checks.testRemovedMemberAndStaleGroupTrafficRejected),
+            ("Group control bounds", checks.testGroupBoundsAndControlEnvelopeValidation),
+            ("Media integrity, persistence and pruning", checks.testMediaIntegrityPersistenceAndPruning),
+            ("Media path, size and format bounds", checks.testMediaPathSizeAndTypeBounds),
+            ("Media quota", checks.testMediaQuotaRejectsNewFiles),
+            ("Verified media receipt and deduplication", checks.testMediaReceiptOnlyAfterExplicitVerificationAndIsDeduplicated),
+            ("Group receipt revision", checks.testGroupReceiptPreservesMembershipRevision),
+            ("Emoji and UTF16 bounds", checks.testEmojiRoundTripAndUTF16Limit)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
-        print("14 core checks passed. Physical radio delivery is not covered.")
+        print("\(tests.count) core checks passed. Physical radio delivery is not covered.")
     }
 }
 #endif

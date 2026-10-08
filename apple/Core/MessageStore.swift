@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Used on the main queue by the app. Atomic file replacement completes before a receipt is created.
 public final class MessageStore {
@@ -96,5 +97,133 @@ public final class ContactBook {
         try JSONEncoder().encode(next).write(to: file, options: .atomic)
         var protected = file; var values = URLResourceValues(); values.isExcludedFromBackup = true
         try protected.setResourceValues(values)
+    }
+}
+
+public struct MeshGroup: Codable, Equatable, Identifiable {
+    public let id: String
+    public let ownerID: String
+    public var name: String
+    public var revision: Int
+    public var members: [ChatProfile]
+    public func validate() throws {
+        guard UUID(uuidString: id) != nil, UUID(uuidString: ownerID) != nil, revision > 0,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.utf16.count <= 60,
+              (1...16).contains(members.count), members.contains(where: { $0.id == ownerID }),
+              Set(members.map(\.id)).count == members.count else { throw FeatureError.invalidGroup }
+        for member in members { _ = try member.validated() }
+    }
+    public func contains(_ id: String) -> Bool { members.contains { $0.id == id } }
+}
+public final class GroupBook {
+    private struct Entry: Codable { var group: MeshGroup; var audience: [ChatProfile] }
+    private let file: URL
+    private var entries: [Entry]
+    public var groups: [MeshGroup] { entries.map(\.group).sorted { $0.name < $1.name } }
+    public init(file: URL) throws {
+        self.file = file
+        if FileManager.default.fileExists(atPath: file.path) { entries = try JSONDecoder().decode([Entry].self, from: Data(contentsOf: file)) }
+        else { entries = [] }
+        guard entries.count <= 100, Set(entries.map { $0.group.id }).count == entries.count else { throw FeatureError.invalidGroup }
+        for entry in entries {
+            try entry.group.validate()
+            guard entry.audience.count <= 500, Set(entry.audience.map(\.id)).count == entry.audience.count,
+                  entry.group.members.allSatisfy({ member in entry.audience.contains(where: { $0.id == member.id }) }) else { throw FeatureError.invalidGroup }
+            for profile in entry.audience { _ = try profile.validated() }
+        }
+    }
+    public func group(_ id: String) -> MeshGroup? { entries.first { $0.group.id == id }?.group }
+    public func audience(_ id: String) -> [ChatProfile] { entries.first { $0.group.id == id }?.audience ?? [] }
+    public func apply(_ group: MeshGroup, from sender: String) throws {
+        try group.validate()
+        guard sender == group.ownerID else { throw FeatureError.ownerOnly }
+        var next = entries
+        if let index = next.firstIndex(where: { $0.group.id == group.id }) {
+            let old = next[index]
+            guard old.group.ownerID == sender else { throw FeatureError.ownerOnly }
+            if group.revision == old.group.revision { guard group == old.group else { throw FeatureError.staleGroup }; return }
+            guard group.revision > old.group.revision else { throw FeatureError.staleGroup }
+            var audience = old.audience
+            for profile in group.members where !audience.contains(where: { $0.id == profile.id }) { audience.append(profile) }
+            guard audience.count <= 500 else { throw FeatureError.invalidGroup }
+            next[index] = Entry(group: group, audience: audience)
+        } else {
+            guard next.count < 100 else { throw FeatureError.invalidGroup }
+            next.append(Entry(group: group, audience: group.members))
+        }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(next).write(to: file, options: .atomic); entries = next
+    }
+    public func permits(_ envelope: Envelope, local: String, peer: String) -> Bool {
+        guard let id = envelope.groupID, let group = group(id), envelope.groupRevision == group.revision,
+              group.contains(local), group.contains(peer), envelope.sender == peer, envelope.to == local else { return false }
+        return envelope.kind == "text" || envelope.kind == "media"
+    }
+}
+
+public struct MediaDescriptor: Codable, Equatable {
+    public let id: String
+    public let kind: String
+    public let fileExtension: String
+    public let bytes: Int64
+    public let sha256: String
+    public func validate() throws {
+        let allowed = kind == "audio" ? ["m4a", "mp3", "aac", "wav", "caf"] : kind == "video" ? ["mp4", "mov", "m4v"] : []
+        guard UUID(uuidString: id) != nil, allowed.contains(fileExtension), (1...MediaVault.maxBytes).contains(bytes),
+              sha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else { throw FeatureError.invalidMedia }
+    }
+}
+public enum FeatureError: Error, LocalizedError {
+    case invalidGroup, ownerOnly, staleGroup, invalidMedia, mediaQuota
+    public var errorDescription: String? {
+        switch self {
+        case .invalidGroup: return "Use a group name up to 60 characters and at most 16 members."
+        case .ownerOnly: return "Only the group owner can change membership."
+        case .staleGroup: return "Group membership is out of date. Reconnect with the owner."
+        case .invalidMedia: return "Choose supported audio or video up to 20 MB."
+        case .mediaQuota: return "Media storage limit reached (200 MB)."
+        }
+    }
+}
+
+public final class MediaVault {
+    public static let maxBytes: Int64 = 20 * 1024 * 1024
+    public static let quota: Int64 = 200 * 1024 * 1024
+    private let directory: URL
+    public init(directory: URL) throws { self.directory = directory; try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+    public func url(for media: MediaDescriptor) throws -> URL { try media.validate(); return directory.appendingPathComponent(media.id + "_" + media.sha256 + "." + media.fileExtension) }
+    public func available(_ media: MediaDescriptor) -> Bool { guard let url = try? url(for: media), let bytes = try? size(url) else { return false }; return bytes == media.bytes }
+    private func digest(_ url: URL) throws -> String {
+        let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
+        var hash = SHA256()
+        while let data = try file.read(upToCount: 65536), !data.isEmpty { hash.update(data: data) }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+    private func size(_ url: URL) throws -> Int64 { (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0 }
+    public func importFile(_ source: URL, kind: String) throws -> MediaDescriptor {
+        let bytes = try size(source)
+        guard bytes > 0, bytes <= Self.maxBytes else { throw FeatureError.invalidMedia }
+        let media = MediaDescriptor(id: UUID().uuidString.lowercased(), kind: kind, fileExtension: source.pathExtension.lowercased(), bytes: bytes, sha256: try digest(source))
+        try media.validate(); try install(source, as: media); return media
+    }
+    public func install(_ source: URL, as media: MediaDescriptor) throws {
+        try media.validate()
+        guard try size(source) == media.bytes, try digest(source) == media.sha256 else { throw FeatureError.invalidMedia }
+        let destination = try url(for: media)
+        if available(media) { return }
+        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let used = try files.reduce(Int64(0)) { try $0 + size($1) }
+        guard used + media.bytes <= Self.quota else { throw FeatureError.mediaQuota }
+        // A crash must not leave a partial file at a path that appears delivered.
+        let staging = directory.appendingPathComponent(".incoming-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        try FileManager.default.copyItem(at: source, to: staging)
+        guard try size(staging) == media.bytes, try digest(staging) == media.sha256 else { throw FeatureError.invalidMedia }
+        if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+        try FileManager.default.moveItem(at: staging, to: destination)
+    }
+    public func prune(keeping ids: Set<String>) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        for file in files where !ids.contains(String(file.lastPathComponent.prefix(36))) { try? FileManager.default.removeItem(at: file) }
     }
 }

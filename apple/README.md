@@ -1,88 +1,74 @@
-# Mac ↔ iPhone offline prototype
+# Mac ↔ iPhone nearby messaging
 
-Native SwiftUI app for macOS 14+ and iOS 17+. It uses Multipeer Connectivity to discover and connect nearby Apple devices without a cloud service. Keep Wi-Fi and Bluetooth enabled. Mobile data and internet access are unnecessary during app operation.
+Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled and the apps open. Messaging works without internet, within local wireless range. It cannot reach someone 100 km away. Android uses a different transport and cannot connect to the Apple app yet.
 
-The Apple version uses the same v1 JSON envelope as Android. **The Apple and Android apps cannot connect to each other yet**: their radio transports differ. A future shared BLE or Wi-Fi transport/bridge is needed.
+## Version 0.4: one complete update
 
-## Usernames and contact chats (0.3.0)
+- Local usernames, explicit chat requests, saved contacts and direct conversations.
+- Named groups, up to 16 members including the creator. The creator adds/removes members and renames the group.
+- Audio files, video files and recorded voice messages in direct and group chats.
+- Audio/video playback, Unicode emojis and an emoji shortcut row.
 
-Update and run **both** Apple apps, then:
+Install this version on **both devices**. Older versions use a different discovery capability and do not appear as compatible contacts. Updating the same bundle identifier preserves your existing device identity and contacts.
 
-1. Enter your username in **Your profile** and press **Save**.
-2. Press **Start network** on both devices.
-3. Search for the other username under **Find people nearby**; compare the eight-character device ID if names match.
-4. Press **Request chat** on one device. The other person chooses **Accept** or **Reject**.
-5. After acceptance and connection, select the saved contact and send text in their chat.
-6. Reconnect accepted contacts from Nearby after a restart. Messages to offline contacts queue for up to one hour.
+## Run on Mac and iPhone
 
-Usernames are local aliases, not globally registered accounts or login credentials. Duplicate usernames are allowed and kept separate by device UUID. There is no global search, account recovery or multi-device account synchronization. Profiles and accepted contacts persist locally; unanswered requests are live session invitations and expire.
+Your existing Xcode signing team can stay as configured. Open `SemanticMesh.xcodeproj`, choose **SemanticMesh**, select your unlocked iPhone and press Run once. Keep Developer Mode enabled and your developer certificate trusted. Allow Local Network permission; microphone permission is requested when you first record a voice message.
 
-The contact UI sends only to the selected, approved session peer. It rejects messages from unaccepted contacts, mismatched sender identities and other recipients before storage or receipt generation. It also checks incoming receipts against the original outgoing message. It does **not** relay contact conversations through other devices; the original mesh engine remains available separately for broadcast/routing work. Both devices need the updated chat build; earlier broadcast-only versions will not appear in chat discovery. Session encryption is enabled, but UUIDs/usernames remain self-claimed and are not cryptographically authenticated.
-
-Fourteen core checks pass, including profile persistence, duplicate names, contact acceptance gates, recipient/source filtering, directed receipts and queued delivery. Native Mac compilation and unsigned iPhone-device compilation pass. Physical acceptance/rejection and three-device chat isolation still require device testing.
-
-## Run on this Mac
-
-The local Apple Silicon development build is at `output/Semantic Mesh.app` (generated, not checked into Git).
+For the Mac, use the **SemanticMeshMac** Xcode scheme, or run:
 
 ```sh
 apple/scripts/build-mac.sh
 open 'apple/output/Semantic Mesh.app'
 ```
 
-Start the network and allow Local Network access if macOS requests it. If discovery fails after declining, enable the app in System Settings → Privacy & Security → Local Network, then Stop/Start.
+The generated Mac application and ZIP are development builds, ad-hoc signed and not notarized. Use a stable app location for permission handling. Xcode setup/signing may need internet; installed messaging does not.
 
-The downloadable Mac ZIP is ad-hoc signed for development, not notarized. The local source build avoids downloading the binary. Install/run the app from a stable location; moving or rebuilding ad-hoc signed applications can affect macOS permission handling.
+If you need to set up another iPhone: add your Apple ID in Xcode Settings → Apple Accounts, select your Personal Team under the SemanticMesh target's Signing & Capabilities, connect/trust the phone, enable Developer Mode and run. [Apple device setup](https://developer.apple.com/documentation/xcode/running-your-app-on-simulated-or-physical-devices).
 
-## Install on iPhone 16
+## Use the features
 
-A Mac command-line build cannot install an iPhone app. Use full **Xcode compatible with your phone's iOS version**; Xcode is not installed on the development Mac used for this change.
+1. Save a username, press **Start network** on both devices, find the other person nearby and press **Request chat**. They accept. Select the saved contact to chat.
+2. Press **Create group**, give it a name and select accepted contacts. The group appears on members' devices when they connect to the creator.
+3. As creator, select the group and press **Add / remove members**. Check or uncheck people, then save.
+4. Use **Audio file** or **Video file** to choose an attachment. On iPhone, **Photos video** selects a clip from your photo library without granting access to the whole library.
+5. Tap **Record voice**, grant microphone access, then **Send recording**. **Cancel recording** discards it. Recording stops automatically after two minutes and sends the result.
+6. Tap **Play audio/video** in a received or sent message. Use the emoji row or your normal emoji keyboard.
 
-1. Install Xcode from Apple and complete its first launch setup.
-2. Open `apple/SemanticMesh.xcodeproj` in Xcode.
-3. Select scheme **SemanticMesh** (the **SemanticMeshMac** scheme is the Mac app).
-4. Connect the unlocked iPhone by USB and accept the Trust prompt.
-5. In Xcode Settings → Apple Accounts, sign in with your Apple ID. In target SemanticMesh → Signing & Capabilities, select your Personal Team and enable automatic signing. Use a unique bundle identifier if Xcode requests it.
-6. Choose your iPhone as the run destination. Enable Developer Mode when Xcode requests it, following the phone's restart/confirmation prompts.
-7. Press Run. On iPhone, start the network and allow Local Network access. Keep the app open and the screen awake.
+Groups send directly to their current members. Each pair of members must have accepted a chat request and connect nearby to exchange messages; the creator does not relay their conversations. Members should connect to the creator first to receive the current membership revision. No global username registration, account recovery or cross-device account synchronization is implemented. Duplicate usernames remain distinct by device UUID.
 
-A personal Apple account is sufficient for local development signing; personal-team provisioning has restrictions and may need renewal. Signing/build setup can require internet, while the installed app's messaging works offline.
+## Limits and delivery behavior
 
-Official instructions: [run on a physical device](https://developer.apple.com/documentation/xcode/running-your-app-on-simulated-or-physical-devices), [enable Developer Mode](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device).
+- Supported audio extensions: m4a, mp3, aac, wav, caf. Video: mp4, mov, m4v. Playback also depends on the file's codec.
+- Each file is capped at 20 MiB; local attachment storage at 200 MiB. Voice recordings use AAC. Up to two file transfers run per device at a time; other transfers retry.
+- Messages and attachments expire after one hour, including sent and received history. Expired media files are cleaned up. Groups and contacts persist.
+- Offline messages queue until reconnection within that hour. On iPhone, moving the app into the background stops networking and cancels a recording. Return and press Start network again.
+- A media receipt is generated after the complete file is stored and its size and SHA-256 digest match the metadata. A receipt means delivered to an app, not read by a person.
+- The creator sends versioned membership updates to current and removed members. Removed members cannot send/receive new group traffic once the update is applied. Disconnected devices can retain an older membership view until they reconnect with the creator; instantaneous offline revocation is impossible here. Already delivered messages/files cannot be recalled.
+- Changing membership stops replay of queued messages from the previous revision. The composer shows this in delivery status; send a new message after the update if needed.
+- Sessions are encrypted. Identities and usernames are self-claimed, without signed accounts or end-to-end identity authentication. Compare device IDs in person. This is a prototype, not a secure replacement for an established messenger.
+- JSON frames remain capped at 16 KiB, text at 2,000 UTF-16 units, message store at 5,000 live envelopes, groups at 100 and contacts at 500. Clocks must roughly agree. Storage errors disable sending rather than erase history.
 
-## First real offline test
-
-1. Start the app on Mac and iPhone. Keep Wi-Fi and Bluetooth ON; turn iPhone mobile data OFF.
-2. Start network on both. On one device, find the other's `Mesh-xxxxxxxx` name and press Connect. Accept the invitation on the other device. Invite from only one side at a time.
-3. Wait until both show one connected peer.
-4. Send `Mac test 1` and `iPhone test 1`. Compare ID prefixes. The sender should show “Stored by 1 peer(s)”.
-5. To prove internet independence, test with the router's internet uplink disconnected. A shared LAN test proves offline operation but still uses network infrastructure.
-6. To test infrastructure-free Apple peer-to-peer operation, disconnect both devices from joined Wi-Fi networks while leaving Wi-Fi enabled; also disconnect Mac Ethernet/VPN and disable iPhone mobile data. Repeat discovery and messaging. Do not turn Wi-Fi off as in the Android Bluetooth test.
-7. Stop the iPhone network. Send from Mac; it should remain locally stored. Restart/reconnect the iPhone within one hour; it should receive the same ID exactly once. A repeat receipt or duplicate text should not appear.
-8. Quit/reopen both apps and reconnect; verify persisted messages and receipts.
-
-Do not count the iOS Simulator as a physical peer for radio acceptance tests. Keep a record of device/OS versions, connectivity settings, message IDs and failures. On iPhone, going into the background stops this prototype's network; return and press Start again. Messages remain stored.
-
-## Implementation and limits
-
-- Separate transport, envelope, persistent store and routing engine. JSON frames are capped at 16 KiB; text at 2,000 UTF-16 units to match Android; IDs are UUIDs.
-- One-hour wall-clock expiry, eight-hop bound, durable ID deduplication. Clocks must roughly agree.
-- Atomic JSON file storage capped at 5,000 live envelopes. Node identity and messages are excluded from backups. Corrupt storage disables sending instead of silently erasing history.
-- App receipts report that another app persisted the message. They do not mean a human read it or verified its contents.
-- Encrypted sessions (`.required`) and explicit invitation approval. No end-to-end signatures, authenticated node identity, trusted groups or revocation. Nearby names and receipts may be forged.
-- Live messages are replayed upon connection and every 15 seconds. Full-store replay is deliberately simple and inefficient; per-peer inventory sync and backpressure are future work.
-- Broadcast multi-hop in the core engine is application-level flooding, not a guarantee that Multipeer Connectivity exposes a chosen physical radio topology. Three-node core simulation passes; physical three-device routing is unverified.
-- The UI shows the latest 100 live text messages; the store retains up to its cap.
-- Apple's current documentation deprecates Multipeer Connectivity in favor of Network framework. This implementation is isolated so a replacement transport can retain the protocol.
-
-## Checks
+## Verification
 
 ```sh
-apple/scripts/test-core.sh      # 8 portable checks; requires only Apple Command Line Tools
-apple/scripts/build-mac.sh      # native Mac UI + transport compilation
-swift test --package-path apple # XCTest suite; requires full Xcode with XCTest available
+apple/scripts/test-core.sh
+apple/scripts/build-mac.sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --package-path apple
 ```
 
-The original eight local core checks covered: Android JSON compatibility, forwarding invariants, bounds/invalid data, persistence/dedup/expiry, three-node simulated relay/receipts, disconnected forwarding, and no forwarding after expiry or hop eight. Mac compilation and development signature verification passed. Local UI automation failed; interactive launch, real wireless discovery and Mac↔iPhone delivery are unverified. The [GitHub Apple check](https://github.com/utkarshbaliyan/semantic-mesh/actions/runs/37364315123) passed the XCTest suite, Mac build and iPhone Simulator compilation. Physical iPhone installation still needs your Apple signing team.
+The 23 core checks cover the original protocol/relay behavior, contact gates, persistence, owner-only group changes, conflicting/stale revisions, removed-member rejection, membership audiences, attachment integrity/path/size/quota checks, delayed media receipts, group receipts and emoji bounds. Native Mac and unsigned iPhone builds are checked separately; GitHub Actions also compiles the iOS Simulator target.
 
-[Apple peer-to-peer networking](https://developer.apple.com/documentation/technotes/tn3111-ios-wifi-api-overview), [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity), [session encryption/deprecation](https://developer.apple.com/documentation/multipeerconnectivity/mcsession/encryptionpreference).
+Real group delivery, microphone recording, photo-picker behavior and media playback still need physical-device testing. UI automation was unavailable on the development Mac. The core's simulated three-node relay does not prove physical mesh routing, and the chat UI does not relay messages.
+
+## Physical acceptance test
+
+1. Update both apps. Start their networks, accept a chat request, send text plus emojis in both directions.
+2. Send a short voice recording, an audio file and a video in both directions. Check playback and that delivery appears after the file finishes transferring.
+3. Stop one device's network, send a file from the other, then restart/reconnect within one hour. Check that only one message appears and playback works.
+4. With three real devices, accept chat requests between every pair. Create a group, reconnect everyone to the creator, then send text and media from each member. Confirm only group members receive them.
+5. Remove a member, reconnect all devices to the creator and confirm they show **Removed** and cannot compose. Confirm remaining members can exchange new messages. Previously delivered files may remain until expiry.
+6. Reject a request and confirm no chat connection appears. Try an unsupported file or a file over 20 MiB; it should be rejected. Deny microphone permission and confirm recording does not begin.
+7. To prove internet independence, disable mobile data and disconnect the router's internet uplink, then repeat. For infrastructure-free testing, leave Wi-Fi enabled but disconnect joined networks, Ethernet and VPN. Keep both apps foregrounded; do not use the Simulator as a radio peer.
+
+Apple's current documentation deprecates Multipeer Connectivity in favor of Network framework. The transport is isolated for later replacement. [Multipeer Connectivity](https://developer.apple.com/documentation/multipeerconnectivity), [resource transfer](https://developer.apple.com/documentation/multipeerconnectivity/mcsession/sendresource(at:withname:topeer:withcompletionhandler:)), [recording permission](https://developer.apple.com/documentation/avfaudio/avaudioapplication/requestrecordpermission(completionhandler:)).

@@ -13,6 +13,15 @@ public final class MeshEngine {
         let e = try Envelope.message(sender: identity, text: text, to: to, now: now)
         try store.insert(e, now: now); received(e); try forward(e, excluding: nil, now: now)
     }
+    public func submit(_ e: Envelope, now: Int64 = Envelope.now()) throws {
+        try store.insert(e, now: now); received(e); try forward(e, excluding: nil, now: now)
+    }
+    public func acknowledge(_ original: Envelope, now: Int64 = Envelope.now()) throws {
+        if store.active(now: now).contains(where: { $0.kind == "ack" && $0.sender == identity && $0.ackFor == original.id }) { return }
+        var ack = try Envelope.receipt(sender: identity, for: original, now: now)
+        ack.groupID = original.groupID; ack.groupRevision = original.groupRevision
+        try submit(ack, now: now)
+    }
     public func receive(_ data: Data, from peer: String, now: Int64 = Envelope.now()) {
         do {
             let e = try Envelope.decode(data, now: now)
@@ -20,8 +29,7 @@ public final class MeshEngine {
             guard try store.insert(e, now: now) else { return }
             received(e)
             if e.kind == "text", e.sender != identity, e.to == nil || e.to == identity {
-                let ack = try Envelope.receipt(sender: identity, for: e, now: now)
-                try store.insert(ack, now: now); received(ack); try forward(ack, excluding: nil, now: now)
+                try acknowledge(e, now: now)
             }
             try forward(e, excluding: peer, now: now)
         } catch { self.error(error) }
