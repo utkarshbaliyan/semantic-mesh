@@ -1,6 +1,6 @@
 # Semantic Mesh
 
-Android phone-only offline communication prototype. The immediate goal is two-phone messaging, then three-phone relaying. No AI, LoRa, cloud, SIM, or internet permission is included.
+Offline device-to-device messaging prototype for Android (Bluetooth) and Mac/iPhone (Apple Multipeer Connectivity). Messages relay across nearby devices with no internet, SIM or cloud. The Android and Apple apps share the same message envelope but cannot talk to each other yet. The immediate goal is two-phone messaging, then three-phone relaying. No AI, LoRa, cloud, SIM, or internet permission is included.
 
 ## Apple prototype
 
