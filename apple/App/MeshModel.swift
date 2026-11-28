@@ -268,6 +268,7 @@ final class MeshModel: ObservableObject {
             for e in updates { if let data = try? e.encoded() { transmit(data) } }
             engine.sync()
             router?.flush()
+            transport?.autoConnect()
             // Re-announced every sync: the other side may not have saved us as a contact yet on first connect.
             if let keys = nodeKeys?.publicKeys, let note = try? JSONEncoder().encode(KeyAnnouncement(id: identity, keys: keys)) {
                 for peer in connected { transport?.send(note, to: peer.id) }
@@ -307,11 +308,27 @@ final class MeshModel: ObservableObject {
         transport.allowResource = { [weak self] name, peer in self?.attachment(name, from: peer) != nil }
         transport.incomingResource = { [weak self] url, name, peer in self?.receiveFile(url, name: name, from: peer) }
         transport.status = { [weak self] text in self?.status(text) }
+        transport.isFriend = { [weak self] id in self?.contactBook?.keys(for: id) != nil }
+        transport.signInvite = { [weak self] to, name, time in
+            guard let self, let keys = self.nodeKeys else { return nil }
+            return InviteProof.sign(keys: keys, from: self.identity, to: to, peerName: name, time: time)
+        }
+        transport.verifyInvite = { [weak self] profile, name, time, sig in
+            guard let self, let keys = self.contactBook?.keys(for: profile.id) else { return false }
+            return InviteProof.verify(sig, keys: keys, from: profile.id, to: self.identity, peerName: name, time: time)
+        }
         transport.invitation = { [weak self] profile, reply in guard let self, self.invitationReply == nil else { reply(false); return }; self.invitationReply = reply; self.pendingInvitation = profile }
         running = true; transport.start()
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.sync() }
-        status("Nearby discovery started. Use version 0.5 on every device.")
+        status("Nearby discovery started. Friends reconnect automatically when they are nearby with the app open.")
     }
+    /// Whether the mesh should run whenever the app is open. On by default; the Stop button turns it off.
+    var meshEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "meshEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "meshEnabled") }
+    }
+    func setMesh(_ on: Bool) { meshEnabled = on; on ? start() : stop() }
+    func resume() { if meshEnabled { start() } }
     func stop() {
         answerInvitation(false); recorder.cancel(); recording = false; requestingMicrophone = false
         timer?.invalidate(); timer = nil; transport?.stop(); transport = nil

@@ -16,7 +16,10 @@ struct SemanticMeshApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(mesh: mesh)
-                .onChange(of: scenePhase) { _, phase in if phase == .background { mesh.stop() } }
+                .onAppear { mesh.resume() }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .background { mesh.stop() } else if phase == .active { mesh.resume() }
+                }
                 #if os(macOS)
                 .frame(minWidth: 760, minHeight: 560)
                 #endif
@@ -124,7 +127,7 @@ struct NetworkBanner: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Button(mesh.running ? "Stop" : "Start") { mesh.running ? mesh.stop() : mesh.start() }
+            Button(mesh.running ? "Stop" : "Start") { mesh.setMesh(!mesh.running) }
                 .buttonStyle(.borderedProminent).tint(mesh.running ? .red : .green)
         }.padding(.vertical, 4)
     }
@@ -412,7 +415,7 @@ struct SettingsView: View {
                     LabeledContent("Safety code") { Text(mesh.safetyCode).monospaced().textSelection(.enabled) }
                 } header: { Text("Security") } footer: { Text("Contacts compare this code in person to confirm it's really you.") }
                 Section {
-                    Toggle("Mesh network", isOn: Binding(get: { mesh.running }, set: { $0 ? mesh.start() : mesh.stop() }))
+                    Toggle("Mesh network", isOn: Binding(get: { mesh.running }, set: { mesh.setMesh($0) }))
                     LabeledContent("Connected devices", value: "\(mesh.connected.count)")
                     LabeledContent("Carrying for others", value: "\(mesh.relayCarried)")
                 } header: { Text("Network") } footer: { Text("Keep Wi-Fi and Bluetooth on and the app open. No internet needed. Text hops across devices; files need a direct connection.") }
@@ -438,7 +441,7 @@ struct NearbyView: View {
         NavigationStack {
             List {
                 if !mesh.running {
-                    Section { Button { mesh.start() } label: { Label("Turn on the mesh to discover people", systemImage: "antenna.radiowaves.left.and.right") } }
+                    Section { Button { mesh.setMesh(true) } label: { Label("Turn on the mesh to discover people", systemImage: "antenna.radiowaves.left.and.right") } }
                 }
                 Section {
                     if mesh.running && mesh.filteredNearby.isEmpty { Text("Looking for people nearby running version 0.5…").foregroundStyle(.secondary) }
@@ -457,7 +460,7 @@ struct NearbyView: View {
                             }
                         }
                     }
-                } header: { Text("Nearby") } footer: { Text("They must accept your request. Compare device IDs in person if names match.") }
+                } header: { Text("Nearby") } footer: { Text("They must accept your first request. After that you're friends: you reconnect automatically whenever you're both nearby with the app open.") }
                 Section("Contacts") {
                     if mesh.contacts.isEmpty { Text("Accepted requests appear here.").foregroundStyle(.secondary) }
                     ForEach(mesh.contacts) { contact in

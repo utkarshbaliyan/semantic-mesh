@@ -62,6 +62,22 @@ public final class NodeKeys {
     }
 }
 
+/// Signed reconnect request between friends who already pinned each other's keys, so the receiver can
+/// accept it without a prompt. Bound to both identities and the inviter's session name; valid for two minutes.
+public enum InviteProof {
+    public static let window: Int64 = 120_000
+    static func message(from: String, to: String, peerName: String, time: Int64) -> Data {
+        Data("sm-invite-v1|\(from)|\(to)|\(peerName)|\(time)".utf8)
+    }
+    public static func sign(keys: NodeKeys, from: String, to: String, peerName: String, time: Int64) -> String? {
+        try? keys.signing.signature(for: message(from: from, to: to, peerName: peerName, time: time)).base64EncodedString()
+    }
+    public static func verify(_ sig: String, keys: PeerKeys, from: String, to: String, peerName: String, time: Int64, now: Int64 = Envelope.now()) -> Bool {
+        guard abs(now - time) <= window, let raw = Data(base64Encoded: sig), raw.count == 64, let key = try? keys.signingKey() else { return false }
+        return key.isValidSignature(raw, for: message(from: from, to: to, peerName: peerName, time: time))
+    }
+}
+
 /// Sent once over each approved direct link so both sides can pin each other's keys.
 public struct KeyAnnouncement: Codable, Equatable {
     public let v: Int

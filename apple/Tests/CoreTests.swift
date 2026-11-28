@@ -409,6 +409,16 @@ final class CoreTests: TestBase {
         XCTAssertThrowsError(try router.accept(forged, from: UUID().uuidString, now: now))
         XCTAssertEqual(router.carriedCount(now: now), 0)
     }
+    func testInviteProofBindsIdentitiesAndExpires() throws {
+        let a = NodeKeys(), b = NodeKeys()
+        let from = UUID().uuidString.lowercased(), to = UUID().uuidString.lowercased()
+        let sig = InviteProof.sign(keys: a, from: from, to: to, peerName: "@alice-1234", time: now)!
+        XCTAssertTrue(InviteProof.verify(sig, keys: a.publicKeys, from: from, to: to, peerName: "@alice-1234", time: now, now: now + 1_000))
+        XCTAssertFalse(InviteProof.verify(sig, keys: b.publicKeys, from: from, to: to, peerName: "@alice-1234", time: now, now: now))
+        XCTAssertFalse(InviteProof.verify(sig, keys: a.publicKeys, from: to, to: from, peerName: "@alice-1234", time: now, now: now))
+        XCTAssertFalse(InviteProof.verify(sig, keys: a.publicKeys, from: from, to: to, peerName: "@mallory-1234", time: now, now: now))
+        XCTAssertFalse(InviteProof.verify(sig, keys: a.publicKeys, from: from, to: to, peerName: "@alice-1234", time: now, now: now + InviteProof.window + 1))
+    }
     func testContactKeysPinnedOnFirstUse() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -460,7 +470,8 @@ final class CoreTests: TestBase {
             ("Four-node chain, single delivery, no backflow", checks.testFourNodeChainDeliversOnceWithoutBackflow),
             ("Carrier store-and-forward", checks.testCarrierDeliversAfterMovingToDestination),
             ("Forged relay frames dropped", checks.testRelayDropsForgedFramesFromKnownSenders),
-            ("Contact keys pinned on first use", checks.testContactKeysPinnedOnFirstUse)
+            ("Contact keys pinned on first use", checks.testContactKeysPinnedOnFirstUse),
+            ("Friend invite proof", checks.testInviteProofBindsIdentitiesAndExpires)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
         print("\(tests.count) core checks passed. Physical radio delivery is not covered.")

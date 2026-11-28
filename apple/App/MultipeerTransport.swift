@@ -9,10 +9,16 @@ struct NearbyPeer: Identifiable {
 }
 
 /// Session invitations are explicit chat requests. Only approved peers may exchange direct frames.
+/// Friends (contacts whose keys are pinned) reconnect on their own: whenever one is discovered and not connected,
+/// a signed invitation is sent, and the friend accepts it without a prompt after checking the signature.
 /// Each remote peer gets its own MCSession: a shared session lets Multipeer join third devices to each other
 /// without an approved request, which then blocks the real request between them.
 final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrowserDelegate, MCNearbyServiceAdvertiserDelegate {
-    private struct Request: Codable { let profile: ChatProfile; let to: String }
+    private struct Request: Codable {
+        let profile: ChatProfile; let to: String
+        /// Present when the inviter could sign with its pinned keys; `auto` marks background reconnects.
+        var time: Int64? = nil; var sig: String? = nil; var auto: Bool? = nil
+    }
     private var localProfile: ChatProfile
     private let localPeer: MCPeerID
     private var sessions: [MCPeerID: MCSession] = [:]
@@ -21,6 +27,13 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     private var approved: [MCPeerID: ChatProfile] = [:]
     private var active = false
     private var transfers: [String: Progress] = [:]
+    /// Latest advertisement per identity; a peer that restarts the app comes back with a new MCPeerID.
+    private var found: [String: NearbyPeer] = [:]
+    private var usedProofs: Set<String> = []
+    /// True for contacts this device can reconnect to automatically (keys pinned).
+    var isFriend: (String) -> Bool = { _ in false }
+    var signInvite: (_ to: String, _ peerName: String, _ time: Int64) -> String? = { _, _, _ in nil }
+    var verifyInvite: (_ profile: ChatProfile, _ peerName: String, _ time: Int64, _ sig: String) -> Bool = { _, _, _, _ in false }
     var discovered: (NearbyPeer) -> Void = { _ in }
     var lost: (String) -> Void = { _ in }
     var connected: (ChatProfile) -> Bool = { _ in false }
@@ -66,7 +79,7 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         current.delegate = nil; current.disconnect(); sessions.removeValue(forKey: peer)
     }
     func start() { active = true; advertiser.startAdvertisingPeer(); browser.startBrowsingForPeers() }
-    func stop() { active = false; advertiser.stopAdvertisingPeer(); browser.stopBrowsingForPeers(); transfers.values.forEach { $0.cancel() }; transfers.removeAll(); sessions.values.forEach { $0.delegate = nil; $0.disconnect() }; sessions.removeAll(); approved.removeAll() }
+    func stop() { active = false; found.removeAll(); usedProofs.removeAll(); advertiser.stopAdvertisingPeer(); browser.stopBrowsingForPeers(); transfers.values.forEach { $0.cancel() }; transfers.removeAll(); sessions.values.forEach { $0.delegate = nil; $0.disconnect() }; sessions.removeAll(); approved.removeAll() }
     func cancelFiles() { transfers.values.forEach { $0.cancel() }; transfers.removeAll() }
     func sendFile(_ url: URL, name: String, to identity: String) {
         guard active, UUID(uuidString: name) != nil,
@@ -82,22 +95,42 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         }
         if let progress { transfers[key] = progress }
     }
-    func invite(_ peer: NearbyPeer) {
+    func invite(_ peer: NearbyPeer, automatic: Bool = false) {
         guard active, peer.id != localProfile.id, !isConnected(peer.peer) else { return }
-        guard let context = try? JSONEncoder().encode(Request(profile: localProfile, to: peer.id)) else { return }
+        var request = Request(profile: localProfile, to: peer.id)
+        let time = Envelope.now()
+        if let sig = signInvite(peer.id, localPeer.displayName, time) { request.time = time; request.sig = sig }
+        if automatic { guard request.sig != nil else { return }; request.auto = true }
+        guard let context = try? JSONEncoder().encode(request) else { return }
         approved[peer.peer] = peer.profile
         requestChanged(peer.id, true)
         let session = makeSession(for: peer.peer)
         browser.invitePeer(peer.peer, to: session, withContext: context, timeout: 20)
-        status("Chat request sent to \(peer.name). Waiting for acceptance.")
+        if !automatic { status("Chat request sent to \(peer.name). Waiting for acceptance.") }
         DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
             guard let self, self.active else { return }
             self.requestChanged(peer.id, false)
             if !self.isConnected(peer.peer) {
                 self.dropSession(for: peer.peer, ifSame: session)
-                self.approved.removeValue(forKey: peer.peer)
-                self.status("Request to \(peer.name) was declined or timed out. You can retry.")
+                if self.sessions[peer.peer] == nil { self.approved.removeValue(forKey: peer.peer) }
+                if !automatic { self.status("Request to \(peer.name) was declined or timed out. You can retry.") }
             }
+        }
+    }
+    /// Invites every friend that is advertising nearby but not connected or already being invited.
+    /// On first sight only the lower identity invites, so two friends don't cross invitations; retries come from both.
+    func autoConnect(firstSight: Bool = false) {
+        guard active else { return }
+        for peer in found.values where isFriend(peer.id) && sessions[peer.peer] == nil && !connectedIdentities().contains(peer.id) {
+            if firstSight && localProfile.id > peer.id { continue }
+            invite(peer, automatic: true)
+        }
+    }
+    private func connectedIdentities() -> Set<String> { Set(connectedPeers().compactMap { approved[$0]?.id }) }
+    /// Drops links to older MCPeerIDs of the same person, left behind when they restarted the app.
+    private func dropStale(_ id: String, keeping peer: MCPeerID) {
+        for (other, profile) in approved where profile.id == id && other != peer {
+            dropSession(for: other); approved.removeValue(forKey: other)
         }
     }
     func send(_ data: Data, to identity: String) {
@@ -114,11 +147,18 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
             guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "3",
                   let id = info?["id"], let username = info?["username"],
                   let profile = try? ChatProfile(id: id, username: username), profile.id != self.localProfile.id else { return }
-            self.discovered(NearbyPeer(profile: profile, peer: peerID))
+            let peer = NearbyPeer(profile: profile, peer: peerID)
+            self.found[profile.id] = peer
+            self.discovered(peer)
+            self.autoConnect(firstSight: true)
         }
     }
     func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
-        DispatchQueue.main.async { [weak self] in guard let self, self.active else { return }; self.lost(peerID.displayName) }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.active else { return }
+            self.found = self.found.filter { $0.value.peer != peerID }
+            self.lost(peerID.displayName)
+        }
     }
     func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
         DispatchQueue.main.async { [weak self] in self?.status("Discovery failed: \(error.localizedDescription). Check Local Network permission.") }
@@ -137,6 +177,17 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
             if self.isConnected(peerID) { invitationHandler(false, nil); return }
             // Both sides invited each other at once: the lower identity keeps its own request.
             if self.sessions[peerID] != nil, self.localProfile.id < profile.id { invitationHandler(false, nil); return }
+            // A friend's signed reconnect is accepted without asking; each signature works once.
+            if let time = request.time, let sig = request.sig {
+                if !self.usedProofs.contains(sig), self.verifyInvite(profile, peerID.displayName, time, sig) {
+                    self.usedProofs.insert(sig)
+                    self.dropStale(profile.id, keeping: peerID)
+                    self.approved[peerID] = profile
+                    invitationHandler(true, self.makeSession(for: peerID)); return
+                }
+            }
+            // Background reconnects never prompt: we may have removed them, or their keys don't match.
+            if request.auto == true { invitationHandler(false, nil); return }
             self.invitation(profile) { [weak self] accept in
                 guard let self, self.active else { invitationHandler(false, nil); return }
                 guard accept else { invitationHandler(false, nil); return }
@@ -154,11 +205,14 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
             }
             guard let profile = self.approved[peerID] else { self.dropSession(for: peerID, ifSame: session); return }
             if state == .connected {
+                self.dropStale(profile.id, keeping: peerID)
                 guard self.connected(profile) else { self.dropSession(for: peerID, ifSame: session); self.approved.removeValue(forKey: peerID); self.publishConnections(); return }
                 self.requestChanged(profile.id, false); self.status("Connected: \(profile.label)")
             } else if state == .notConnected {
                 self.dropSession(for: peerID, ifSame: session)
                 self.requestChanged(profile.id, false); self.status("Disconnected: \(profile.label)")
+                // Brief drops are common on Bluetooth; try again while the friend is still advertising.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.autoConnect() }
             }
             self.publishConnections()
         }
