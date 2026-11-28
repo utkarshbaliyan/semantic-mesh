@@ -21,6 +21,10 @@
 		000000000000000000000025 /* Core/MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000006 /* Core/MessageStore.swift */; };
 		0000000000000000000000A2 /* Core/Relay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000A1 /* Core/Relay.swift */; };
 		0000000000000000000000A3 /* Core/Relay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000A1 /* Core/Relay.swift */; };
+		0000000000000000000000B2 /* Core/SecretBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000B1 /* Core/SecretBox.swift */; };
+		0000000000000000000000B3 /* Core/SecretBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000B1 /* Core/SecretBox.swift */; };
+		0000000000000000000000C2 /* Core/Database.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000C1 /* Core/Database.swift */; };
+		0000000000000000000000C3 /* Core/Database.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000C1 /* Core/Database.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +40,8 @@
 		000000000000000000000011 /* SemanticMesh.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SemanticMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		00000000000000000000001F /* SemanticMeshMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SemanticMeshMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0000000000000000000000A1 /* Core/Relay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Relay.swift; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000B1 /* Core/SecretBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/SecretBox.swift; sourceTree = SOURCE_ROOT; };
+		0000000000000000000000C1 /* Core/Database.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Database.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +72,8 @@
 				000000000000000000000005 /* Core/MeshEngine.swift */,
 				000000000000000000000006 /* Core/MessageStore.swift */,
 				0000000000000000000000A1 /* Core/Relay.swift */,
+				0000000000000000000000B1 /* Core/SecretBox.swift */,
+				0000000000000000000000C1 /* Core/Database.swift */,
 				000000000000000000000007 /* App/MacInfo.plist */,
 				000000000000000000000008 /* App/iOSInfo.plist */,
 				000000000000000000000009 /* App/Mac.entitlements */,
@@ -175,6 +183,8 @@
 				000000000000000000000016 /* Core/MeshEngine.swift in Sources */,
 				000000000000000000000017 /* Core/MessageStore.swift in Sources */,
 				0000000000000000000000A2 /* Core/Relay.swift in Sources */,
+				0000000000000000000000B2 /* Core/SecretBox.swift in Sources */,
+				0000000000000000000000C2 /* Core/Database.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -189,6 +199,8 @@
 				000000000000000000000024 /* Core/MeshEngine.swift in Sources */,
 				000000000000000000000025 /* Core/MessageStore.swift in Sources */,
 				0000000000000000000000A3 /* Core/Relay.swift in Sources */,
+				0000000000000000000000B3 /* Core/SecretBox.swift in Sources */,
+				0000000000000000000000C3 /* Core/Database.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

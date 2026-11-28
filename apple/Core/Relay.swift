@@ -176,7 +176,7 @@ public struct SealedFrame: Codable, Equatable {
     public func validate(now: Int64) throws {
         guard v == 2, kind == "sealed", UUID(uuidString: id) != nil, UUID(uuidString: from) != nil, UUID(uuidString: to) != nil,
               from != to, (0...8).contains(hops), created >= 0, created <= now + 300_000,
-              expires > created, expires - created <= 3_600_000,
+              expires > created, expires - created <= Envelope.maxLifetime,
               let b = Data(base64Encoded: box), b.count > 28, b.count <= Self.maxInnerBytes + 28,
               let s = Data(base64Encoded: sig), s.count == 64 else { throw RelayError.invalidFrame }
     }
@@ -224,41 +224,7 @@ public enum RelayError: Error, LocalizedError {
     }
 }
 
-/// Persistent store of frames carried for the mesh, including this device's own outgoing frames.
-public final class RelayStore {
-    public static let capacity = 500
-    private let file: URL
-    private var frames: [SealedFrame]
-    public init(file: URL) throws {
-        self.file = file
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: file.path),
-           let saved = try? JSONDecoder().decode([SealedFrame].self, from: Data(contentsOf: file)) {
-            let now = Envelope.now()
-            frames = Array(saved.filter { (try? $0.validate(now: max(now, $0.created))) != nil && $0.expires > now }.prefix(Self.capacity))
-        } else { frames = [] }
-    }
-    public func active(now: Int64 = Envelope.now()) -> [SealedFrame] { frames.filter { $0.expires > now } }
-    public func contains(_ id: String) -> Bool { frames.contains { $0.id == id } }
-    /// Returns false for duplicates. When full, evicts the soonest-expiring frame carried for others.
-    @discardableResult public func insert(_ frame: SealedFrame, local: String, now: Int64 = Envelope.now()) throws -> Bool {
-        try frame.validate(now: now)
-        guard frame.expires > now else { return false }
-        var next = active(now: now)
-        guard !next.contains(where: { $0.id == frame.id }) else { return false }
-        if next.count >= Self.capacity {
-            guard let victim = next.indices.filter({ next[$0].from != local && next[$0].to != local }).min(by: { next[$0].expires < next[$1].expires })
-            else { throw MeshError.storeFull }
-            next.remove(at: victim)
-        }
-        next.append(frame)
-        try JSONEncoder().encode(next).write(to: file, options: .atomic)
-        var protected = file; var values = URLResourceValues(); values.isExcludedFromBackup = true
-        try protected.setResourceValues(values)
-        frames = next
-        return true
-    }
-}
+// RelayStore now lives in Database.swift (SQLite-backed, encrypted at rest, 2,000 frames / 50 MB).
 
 /// Epidemic store-and-forward: every frame is offered once to every connected peer, except where it came
 /// from and its originator. A frame whose destination is directly connected goes only to that destination.

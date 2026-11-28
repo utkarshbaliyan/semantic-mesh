@@ -115,7 +115,7 @@ final class CoreTests: TestBase {
         for _ in 0..<8 { e = try e.forwarded() }
         engine.receive(try e.encoded(), from: "B", now: now)
         XCTAssertEqual(transmissions, 0)
-        let expired = try Envelope.message(sender: UUID().uuidString, text: "old", now: now - 3_600_000)
+        let expired = try Envelope.message(sender: UUID().uuidString, text: "old", now: now - Envelope.maxLifetime)
         engine.receive(try expired.encoded(), from: "B", now: now)
         XCTAssertEqual(engine.store.active(now: now).count, 1)
         XCTAssertEqual(transmissions, 0)
@@ -452,6 +452,60 @@ final class CoreTests: TestBase {
         try restored.setNickname("", for: id)
         XCTAssertEqual(restored.displayName(for: id), "bob")
     }
+    func testEncryptedStoreKeepsHistoryBeyondDeliveryWindowAndEncryptsAtRest() throws {
+        let directory = featureDirectory()
+        let file = directory.appendingPathComponent("mesh.sqlite")
+        let sender = UUID().uuidString.lowercased(), other = UUID().uuidString.lowercased()
+        let e = try Envelope.message(sender: sender, text: "secret-at-rest-marker", to: other, now: now)
+        do {
+            let db = try MeshDatabase(file: file, secret: try SecretBox(directory: directory, useKeychain: false))
+            let store = MessageStore(database: db)
+            XCTAssertTrue(try store.insert(e, now: now))
+            XCTAssertFalse(try store.insert(e, now: now))               // dedup
+            XCTAssertEqual(store.active(now: now).count, 1)
+            XCTAssertTrue(store.active(now: e.expires).isEmpty)          // delivery window closed
+            XCTAssertEqual(store.stored().count, 1)                      // history remains
+        }
+        // The plaintext must not be on disk.
+        let raw = try Data(contentsOf: file) + ((try? Data(contentsOf: directory.appendingPathComponent("mesh.sqlite-wal"))) ?? Data())
+        XCTAssertTrue(raw.range(of: Data("secret-at-rest-marker".utf8)) == nil)
+        // Reopen with the same key file: history survives restart; deletion works.
+        let db2 = try MeshDatabase(file: file, secret: try SecretBox(directory: directory, useKeychain: false))
+        let store2 = MessageStore(database: db2)
+        XCTAssertEqual(store2.stored().count, 1)
+        XCTAssertEqual(store2.active(now: now).first?.text, "secret-at-rest-marker")
+        store2.deleteDirect(sender, other)
+        XCTAssertTrue(store2.stored().isEmpty)
+    }
+    func testDisappearingSettingsPersist() throws {
+        let directory = featureDirectory()
+        let file = directory.appendingPathComponent("mesh.sqlite")
+        do {
+            let store = MessageStore(database: try MeshDatabase(file: file, secret: try SecretBox(directory: directory, useKeychain: false)))
+            try store.setDisappearing(["c:abc": 86_400_000])
+        }
+        let store = MessageStore(database: try MeshDatabase(file: file, secret: try SecretBox(directory: directory, useKeychain: false)))
+        XCTAssertEqual(store.disappearing()["c:abc"], 86_400_000)
+    }
+    func testRelayStoreProtectsOwnAndAddressedFramesWhenClearing() throws {
+        let directory = featureDirectory()
+        let local = UUID().uuidString.lowercased()
+        let a = NodeKeys(), b = NodeKeys()
+        let other1 = UUID().uuidString.lowercased(), other2 = UUID().uuidString.lowercased()
+        let store = try RelayStore(file: directory.appendingPathComponent("mesh.sqlite"))
+        // own outgoing (from local), addressed-to-me (to local), and carried-for-others.
+        let mine = try SealedFrame.seal(Envelope.message(sender: local, text: "mine", to: other1, now: now), keys: a, recipient: b.publicKeys)
+        let toMe = try SealedFrame.seal(Envelope.message(sender: other1, text: "to me", to: local, now: now), keys: a, recipient: b.publicKeys)
+        let carried = try SealedFrame.seal(Envelope.message(sender: other1, text: "carry", to: other2, now: now), keys: a, recipient: b.publicKeys)
+        XCTAssertTrue(try store.insert(mine, local: local, now: now))
+        XCTAssertTrue(try store.insert(toMe, local: local, now: now))
+        XCTAssertTrue(try store.insert(carried, local: local, now: now))
+        XCTAssertFalse(try store.insert(carried, local: local, now: now)) // dedup
+        XCTAssertEqual(store.usage(now: now).count, 3)
+        store.clearCarried(local: local)
+        let ids = Set(store.active(now: now).map(\.id))
+        XCTAssertTrue(ids.contains(mine.id)); XCTAssertTrue(ids.contains(toMe.id)); XCTAssertFalse(ids.contains(carried.id))
+    }
     func testInviteProofBindsIdentitiesAndExpires() throws {
         let a = NodeKeys(), b = NodeKeys()
         let from = UUID().uuidString.lowercased(), to = UUID().uuidString.lowercased()
@@ -517,7 +571,10 @@ final class CoreTests: TestBase {
             ("Friend invite proof", checks.testInviteProofBindsIdentitiesAndExpires),
             ("Identity tag from signing key", checks.testIdentityTagIsStableFourHexFromSigningKey),
             ("Contact card link round-trip", checks.testContactCardLinkRoundTripAndRejection),
-            ("Nicknames and verified contacts", checks.testNicknamesAndVerifiedPersistAndOverrideUsername)
+            ("Nicknames and verified contacts", checks.testNicknamesAndVerifiedPersistAndOverrideUsername),
+            ("Encrypted store history and at-rest", checks.testEncryptedStoreKeepsHistoryBeyondDeliveryWindowAndEncryptsAtRest),
+            ("Disappearing settings persist", checks.testDisappearingSettingsPersist),
+            ("Relay store protects own/addressed frames", checks.testRelayStoreProtectsOwnAndAddressedFramesWhenClearing)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
         print("\(tests.count) core checks passed. Physical radio delivery is not covered.")

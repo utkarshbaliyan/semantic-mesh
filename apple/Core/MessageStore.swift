@@ -1,36 +1,7 @@
 import Foundation
 import CryptoKit
 
-/// Used on the main queue by the app. Atomic file replacement completes before a receipt is created.
-public final class MessageStore {
-    private let file: URL
-    private var entries: [Envelope]
-    public init(file: URL) throws {
-        self.file = file
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: file.path) {
-            entries = try JSONDecoder().decode([Envelope].self, from: Data(contentsOf: file))
-            guard entries.count <= 5000 else { throw MeshError.storeFull }
-            // Expired entries remain eligible for cleanup even if they predate current validation rules.
-            for e in entries { try e.validate(now: max(Envelope.now(), e.created)) }
-        } else { entries = [] }
-    }
-    public func active(now: Int64 = Envelope.now()) -> [Envelope] { entries.filter { $0.expires > now } }
-    @discardableResult public func insert(_ envelope: Envelope, now: Int64 = Envelope.now()) throws -> Bool {
-        try envelope.validate(now: now)
-        guard envelope.expires > now else { return false }
-        var next = active(now: now)
-        guard !next.contains(where: { $0.id == envelope.id }) else { return false }
-        guard next.count < 5000 else { throw MeshError.storeFull }
-        next.append(envelope)
-        try JSONEncoder().encode(next).write(to: file, options: .atomic)
-        var protected = file
-        var values = URLResourceValues(); values.isExcludedFromBackup = true
-        try protected.setResourceValues(values)
-        entries = next
-        return true
-    }
-}
+// MessageStore now lives in Database.swift (SQLite-backed, encrypted at rest).
 
 /// Usernames are local aliases, not globally registered or authenticated accounts.
 public struct ChatProfile: Codable, Equatable, Identifiable {
@@ -69,15 +40,15 @@ public final class ContactBook {
         var nicknames: [String: String]? = nil
         var verified: [String]? = nil
     }
-    private let file: URL
+    private let backend: BlobStore
+    private let key: String
     private var state: State
     public var username: String { state.username }
     public var contacts: [ChatProfile] { state.contacts.sorted { $0.username == $1.username ? $0.id < $1.id : $0.username < $1.username } }
-    public init(file: URL, defaultUsername: String) throws {
-        self.file = file
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: file.path) {
-            state = try JSONDecoder().decode(State.self, from: Data(contentsOf: file))
+    public init(backend: BlobStore, key: String = "contacts", defaultUsername: String) throws {
+        self.backend = backend; self.key = key
+        if let data = try backend.load(key) {
+            state = try JSONDecoder().decode(State.self, from: data)
             state.username = try ChatProfile.normalize(state.username)
             guard state.contacts.count <= 500 else { throw ProfileError.tooManyContacts }
             state.contacts = try state.contacts.map { try $0.validated() }
@@ -86,6 +57,11 @@ public final class ContactBook {
             state.nicknames = (state.nicknames ?? [:]).filter { id, name in state.contacts.contains { $0.id == id } && !name.isEmpty }
             state.verified = (state.verified ?? []).filter { id in state.contacts.contains { $0.id == id } }
         } else { state = State(username: try ChatProfile.normalize(defaultUsername), contacts: []); try save(state) }
+    }
+    /// Test convenience: a file-backed book at the given path.
+    public convenience init(file: URL, defaultUsername: String) throws {
+        let backend = try FileBlobStore(directory: file.deletingLastPathComponent())
+        try self.init(backend: backend, key: file.deletingPathExtension().lastPathComponent, defaultUsername: defaultUsername)
     }
     public func profile(for id: String) -> ChatProfile? { state.contacts.first { $0.id == id } }
     public func keys(for id: String) -> PeerKeys? { state.keys?[id] }
@@ -134,9 +110,7 @@ public final class ContactBook {
         profile(for: peerIdentity) != nil && e.sender == peerIdentity && e.to == localIdentity && e.sender != localIdentity
     }
     private func save(_ next: State) throws {
-        try JSONEncoder().encode(next).write(to: file, options: .atomic)
-        var protected = file; var values = URLResourceValues(); values.isExcludedFromBackup = true
-        try protected.setResourceValues(values)
+        try backend.save(key, try JSONEncoder().encode(next))
     }
 }
 
@@ -157,12 +131,13 @@ public struct MeshGroup: Codable, Equatable, Identifiable {
 }
 public final class GroupBook {
     private struct Entry: Codable { var group: MeshGroup; var audience: [ChatProfile] }
-    private let file: URL
+    private let backend: BlobStore
+    private let key: String
     private var entries: [Entry]
     public var groups: [MeshGroup] { entries.map(\.group).sorted { $0.name < $1.name } }
-    public init(file: URL) throws {
-        self.file = file
-        if FileManager.default.fileExists(atPath: file.path) { entries = try JSONDecoder().decode([Entry].self, from: Data(contentsOf: file)) }
+    public init(backend: BlobStore, key: String = "groups") throws {
+        self.backend = backend; self.key = key
+        if let data = try backend.load(key) { entries = try JSONDecoder().decode([Entry].self, from: data) }
         else { entries = [] }
         guard entries.count <= 100, Set(entries.map { $0.group.id }).count == entries.count else { throw FeatureError.invalidGroup }
         for entry in entries {
@@ -191,8 +166,12 @@ public final class GroupBook {
             guard next.count < 100 else { throw FeatureError.invalidGroup }
             next.append(Entry(group: group, audience: group.members))
         }
-        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(next).write(to: file, options: .atomic); entries = next
+        try backend.save(key, try JSONEncoder().encode(next)); entries = next
+    }
+    /// Test convenience: a file-backed book at the given path.
+    public convenience init(file: URL) throws {
+        let backend = try FileBlobStore(directory: file.deletingLastPathComponent())
+        try self.init(backend: backend, key: file.deletingPathExtension().lastPathComponent)
     }
     public func permits(_ envelope: Envelope, local: String, peer: String) -> Bool {
         guard let id = envelope.groupID, let group = group(id), envelope.groupRevision == group.revision,
@@ -221,16 +200,25 @@ public enum FeatureError: Error, LocalizedError {
         case .ownerOnly: return "Only the group owner can change membership."
         case .staleGroup: return "Group membership is out of date. Reconnect with the owner."
         case .invalidMedia: return "Choose supported audio or video up to 20 MB."
-        case .mediaQuota: return "Media storage limit reached (200 MB)."
+        case .mediaQuota: return "Media storage limit reached (1 GB)."
         }
     }
 }
 
 public final class MediaVault {
     public static let maxBytes: Int64 = 20 * 1024 * 1024
-    public static let quota: Int64 = 200 * 1024 * 1024
+    public static let quota: Int64 = 1024 * 1024 * 1024
     private let directory: URL
     public init(directory: URL) throws { self.directory = directory; try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+    /// Total bytes of stored media files, for the Storage settings section.
+    public func usage() -> Int64 {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return 0 }
+        return files.reduce(Int64(0)) { $0 + ((try? size($1)) ?? 0) }
+    }
+    public func clearAll() {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
+        for file in files { try? FileManager.default.removeItem(at: file) }
+    }
     public func url(for media: MediaDescriptor) throws -> URL { try media.validate(); return directory.appendingPathComponent(media.id + "_" + media.sha256 + "." + media.fileExtension) }
     public func available(_ media: MediaDescriptor) -> Bool { guard let url = try? url(for: media), let bytes = try? size(url) else { return false }; return bytes == media.bytes }
     private func digest(_ url: URL) throws -> String {

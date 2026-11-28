@@ -25,6 +25,11 @@ func meshQRImage(from string: String) -> Image? {
     #endif
 }
 
+func byteLabel(_ bytes: Int64) -> String {
+    let formatter = ByteCountFormatter(); formatter.countStyle = .file
+    return formatter.string(fromByteCount: max(0, bytes))
+}
+
 struct MyQRView: View {
     @ObservedObject var mesh: MeshModel
     var body: some View {
@@ -481,6 +486,16 @@ struct ChatInfoView: View {
                         LabeledContent("Safety code") { Text(mesh.safetyCode(for: contact.id) ?? "Not exchanged yet").monospaced() }
                     } header: { Text("Security") } footer: { Text(mesh.isVerified(contact.id) ? "Added by scanning their code — identity verified." : "Compare this code with the one in their Settings, in person. If they match, nobody is impersonating them.") }
                 }
+                if let chatKey = mesh.selectedChatKey {
+                    Section {
+                        Picker("Disappearing messages", selection: Binding(
+                            get: { mesh.disappearing(for: chatKey) },
+                            set: { mesh.setDisappearing($0, for: chatKey) })) {
+                            ForEach(mesh.disappearingChoices, id: \.1) { choice in Text(choice.0).tag(choice.1) }
+                        }
+                        Button("Delete chat", role: .destructive) { mesh.deleteCurrentChat(); panel = nil }
+                    } footer: { Text("Disappearing removes messages older than the chosen age on this device. Delete chat removes this conversation's history here now.") }
+                }
                 Section("Media") {
                     if media.isEmpty { Text("No audio or video in this chat.").foregroundStyle(.secondary) }
                     ForEach(media, id: \.id) { e in
@@ -557,8 +572,19 @@ struct SettingsView: View {
                     LabeledContent("Connected devices", value: "\(mesh.connected.count)")
                     LabeledContent("Carrying for others", value: "\(mesh.relayCarried)")
                 } header: { Text("Network") } footer: { Text("Keep Wi-Fi and Bluetooth on and the app open. No internet needed. Text hops across devices; files need a direct connection.") }
+                Section {
+                    Stepper(value: Binding(get: { mesh.deliveryLifetimeDays }, set: { mesh.deliveryLifetimeDays = $0 }), in: 1...7) {
+                        LabeledContent("Keep delivering for", value: "\(mesh.deliveryLifetimeDays) day\(mesh.deliveryLifetimeDays == 1 ? "" : "s")")
+                    }
+                } header: { Text("Delivery window") } footer: { Text("How long a queued message keeps trying to reach its recipient through the mesh before it expires. Default 3 days, up to 7. Chat history you can see stays until you delete it.") }
+                Section {
+                    LabeledContent("Media stored", value: byteLabel(mesh.mediaUsageBytes) + " of 1 GB")
+                    LabeledContent("Relay cache", value: "\(mesh.relayUsage.count) frames · \(byteLabel(mesh.relayUsage.bytes))")
+                    Button("Clear media", role: .destructive) { mesh.clearAllMedia() }
+                    Button("Clear relay cache", role: .destructive) { mesh.clearRelayCache() }
+                } header: { Text("Storage") } footer: { Text("Data is encrypted at rest (key in the \(mesh.storageKeySource)). The relay cache holds sealed messages you carry for others; clearing it never drops your own chats.") }
                 Section("Limits") {
-                    Text("Messages and files expire after 1 hour. Text up to 2,000 characters. Audio/video up to 20 MB. Voice up to 2 minutes. Groups up to 16 people.").font(.caption)
+                    Text("Chat history is kept until you delete it (or a per-chat disappearing timer removes it). Delivery of queued messages expires after your chosen window (default 3 days, max 7). Text up to 2,000 characters; audio/video up to 20 MB; voice up to 2 minutes; groups up to 16 people.").font(.caption)
                 }
                 Section("Network log") {
                     if mesh.log.isEmpty { Text("No events yet.").foregroundStyle(.secondary) }

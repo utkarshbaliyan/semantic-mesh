@@ -2,6 +2,11 @@ import Foundation
 
 public struct Envelope: Codable, Equatable {
     public static let maxBytes = 16_384
+    /// How long a message stays eligible for delivery/relay. Configurable; default 3 days, max 7.
+    public static let defaultLifetime: Int64 = 3 * 86_400_000
+    public static let maxLifetime: Int64 = 7 * 86_400_000
+    /// The current delivery lifetime, adjustable in Settings. Clock-skew tolerance stays 5 minutes.
+    public static var lifetime: Int64 = defaultLifetime
     public let v: Int
     public let id: String
     public let sender: String
@@ -20,36 +25,36 @@ public struct Envelope: Codable, Equatable {
     public static func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
     public static func message(sender: String, text: String, to: String? = nil, now: Int64 = now()) throws -> Envelope {
         let e = Envelope(v: 1, id: UUID().uuidString.lowercased(), sender: sender, kind: "text",
-                         created: now, expires: now + 3_600_000, hops: 0, text: text, ackFor: nil, to: to)
+                         created: now, expires: now + Self.lifetime, hops: 0, text: text, ackFor: nil, to: to)
         try e.validate(now: now); return e
     }
     public static func receipt(sender: String, for original: Envelope, now: Int64 = now()) throws -> Envelope {
         let e = Envelope(v: 1, id: UUID().uuidString.lowercased(), sender: sender, kind: "ack",
-                         created: now, expires: now + 3_600_000, hops: 0, text: nil, ackFor: original.id, to: original.sender)
+                         created: now, expires: now + Self.lifetime, hops: 0, text: nil, ackFor: original.id, to: original.sender)
         try e.validate(now: now); return e
     }
     public static func groupUpdate(_ group: MeshGroup, to: String, now: Int64 = now()) throws -> Envelope {
         var e = Envelope(v: 1, id: UUID().uuidString.lowercased(), sender: group.ownerID, kind: "group",
-                         created: now, expires: now + 3_600_000, hops: 0, text: nil, ackFor: nil, to: to)
+                         created: now, expires: now + Self.lifetime, hops: 0, text: nil, ackFor: nil, to: to)
         e.groupID = group.id; e.groupRevision = group.revision; e.group = group
         try e.validate(now: now); return e
     }
     public static func attachment(sender: String, media: MediaDescriptor, to: String?, group: MeshGroup? = nil, now: Int64 = now()) throws -> Envelope {
         var e = Envelope(v: 1, id: UUID().uuidString.lowercased(), sender: sender, kind: "media",
-                         created: now, expires: now + 3_600_000, hops: 0, text: nil, ackFor: nil, to: to)
+                         created: now, expires: now + Self.lifetime, hops: 0, text: nil, ackFor: nil, to: to)
         e.media = media; e.groupID = group?.id; e.groupRevision = group?.revision
         try e.validate(now: now); return e
     }
     public static func ready(sender: String, for original: Envelope, now: Int64 = now()) throws -> Envelope {
         var e = Envelope(v: 1, id: UUID().uuidString.lowercased(), sender: sender, kind: "media_ready",
-                         created: now, expires: now + 3_600_000, hops: 0, text: nil, ackFor: original.id, to: original.sender)
+                         created: now, expires: now + Self.lifetime, hops: 0, text: nil, ackFor: original.id, to: original.sender)
         e.groupID = original.groupID; e.groupRevision = original.groupRevision
         try e.validate(now: now); return e
     }
     public func validate(now: Int64 = now()) throws {
         guard v == 1, UUID(uuidString: id) != nil, UUID(uuidString: sender) != nil,
               (0...8).contains(hops), created >= 0, created <= now + 300_000,
-              expires > created, expires - created <= 3_600_000 else { throw MeshError.invalidEnvelope }
+              expires > created, expires - created <= Self.maxLifetime else { throw MeshError.invalidEnvelope }
         if let to, UUID(uuidString: to) == nil { throw MeshError.invalidEnvelope }
         if let groupID { guard UUID(uuidString: groupID) != nil, let groupRevision, groupRevision > 0 else { throw MeshError.invalidEnvelope } }
         if groupID == nil, groupRevision != nil { throw MeshError.invalidEnvelope }

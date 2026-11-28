@@ -68,6 +68,8 @@ final class MeshModel: ObservableObject {
     private var contactBook: ContactBook?
     private var groupBook: GroupBook?
     private var vault: MediaVault?
+    private var database: MeshDatabase?
+    private var keyFallbackNote = false
     private var invitationReply: ((Bool) -> Void)?
     private var transport: MultipeerTransport?
     private var engine: MeshEngine?
@@ -106,9 +108,9 @@ final class MeshModel: ObservableObject {
         if !running { return "Mesh is off. Turn it on from the chat list to send and receive." }
         if let contact = selectedContact, !isConnected(contact.id) {
             return reachableViaMesh(contact.id) ? "Not nearby. Text travels through the mesh; files need a direct connection."
-                                                : "Offline. Messages are delivered when you reconnect within one hour."
+                                                : "Offline. Messages are delivered when you reconnect within the delivery window."
         }
-        if messages.isEmpty { return "Messages and files expire after one hour." }
+        if messages.isEmpty { return "Chat history stays until you delete it. Delivery expires after the set window; files need a direct connection." }
         return nil
     }
     func reachability(_ id: String) -> String { isConnected(id) ? "Nearby" : reachableViaMesh(id) ? "Via mesh" : "Offline" }
@@ -134,13 +136,21 @@ final class MeshModel: ObservableObject {
                 let saved = try String(contentsOf: identityFile, encoding: .utf8)
                 guard UUID(uuidString: saved) != nil else { throw MeshError.invalidEnvelope }; nodeID = saved
             } else { try nodeID.write(to: identityFile, atomically: true, encoding: .utf8) }
-            let storage = try MessageStore(file: directory.appendingPathComponent("messages.json"))
-            contactBook = try ContactBook(file: directory.appendingPathComponent("contacts.json"), defaultUsername: "mesh_" + nodeID.prefix(6))
-            groupBook = try GroupBook(file: directory.appendingPathComponent("groups.json"))
+            Envelope.lifetime = Self.savedDeliveryLifetime()
+            let secret = try SecretBox(directory: directory)
+            let db = try MeshDatabase(file: directory.appendingPathComponent("mesh.sqlite"), secret: secret)
+            database = db
+            let blobs = DatabaseBlobStore(db)
+            let storage = MessageStore(database: db)
+            let relayStore = RelayStore(database: db)
+            Self.migrateIfNeeded(directory: directory, db: db, messages: storage, frames: relayStore, local: nodeID)
+            contactBook = try ContactBook(backend: blobs, defaultUsername: "mesh_" + nodeID.prefix(6))
+            groupBook = try GroupBook(backend: blobs)
             vault = try MediaVault(directory: directory.appendingPathComponent("media"))
             nodeKeys = try NodeKeys(file: directory.appendingPathComponent("node-keys.json"))
-            router = RelayRouter(local: nodeID, store: try RelayStore(file: directory.appendingPathComponent("relay.json")))
+            router = RelayRouter(local: nodeID, store: relayStore)
             engine = MeshEngine(identity: nodeID, store: storage)
+            keyFallbackNote = secret.source == .file
         } catch { storageError = error; engine = nil }
         identity = nodeID
         if let engine, let book = contactBook {
@@ -151,9 +161,94 @@ final class MeshModel: ObservableObject {
             engine.error = { [weak self] error in self?.status(error.localizedDescription) }
             router?.send = { [weak self] data, peer in self?.transport?.send(data, to: peer) }
             router?.keysFor = { [weak self] id in self?.contactBook?.keys(for: id) }
+            if keyFallbackNote { status("Secure storage uses a protected key file (the Keychain was unavailable on this build).") }
             refresh()
         } else { status("Storage unavailable: \(storageError?.localizedDescription ?? "unknown error"). Sending is disabled.") }
     }
+
+    // MARK: - Delivery lifetime (default 3 days, max 7)
+
+    static func savedDeliveryLifetime() -> Int64 {
+        let days = UserDefaults.standard.object(forKey: "deliveryLifetimeDays") as? Int ?? 3
+        return Int64(min(7, max(1, days))) * 86_400_000
+    }
+    var deliveryLifetimeDays: Int {
+        get { Int(Envelope.lifetime / 86_400_000) }
+        set {
+            let days = min(7, max(1, newValue))
+            UserDefaults.standard.set(days, forKey: "deliveryLifetimeDays")
+            Envelope.lifetime = Int64(days) * 86_400_000
+        }
+    }
+
+    // MARK: - One-time migration from 0.5 JSON files
+
+    private static func migrateIfNeeded(directory: URL, db: MeshDatabase, messages: MessageStore, frames: RelayStore, local: String) {
+        guard (try? db.kvGet("migrated-v6")).flatMap({ $0 }) == nil else { return }
+        let fm = FileManager.default
+        func blob(_ name: String, into key: String) {
+            let file = directory.appendingPathComponent(name)
+            if let data = try? Data(contentsOf: file) { try? db.kvSet(key, data) }
+        }
+        blob("contacts.json", into: "contacts")
+        blob("groups.json", into: "groups")
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("messages.json")),
+           let old = try? JSONDecoder().decode([Envelope].self, from: data) {
+            for e in old { _ = try? messages.insert(e) }
+        }
+        if let data = try? Data(contentsOf: directory.appendingPathComponent("relay.json")),
+           let old = try? JSONDecoder().decode([SealedFrame].self, from: data) {
+            for f in old { _ = try? frames.insert(f, local: local) }
+        }
+        try? db.kvSet("migrated-v6", Data([1]))
+        for name in ["messages.json", "relay.json", "contacts.json", "groups.json"] {
+            try? fm.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
+    // MARK: - Disappearing messages, delete chat, storage usage
+
+    private static let disappearingOptions: [(String, Int64)] = [("Off", 0), ("24 hours", 86_400_000), ("7 days", 7 * 86_400_000), ("90 days", 90 * 86_400_000)]
+    var disappearingChoices: [(String, Int64)] { Self.disappearingOptions }
+    func disappearing(for chatKey: String) -> Int64 { engine?.store.disappearing()[chatKey] ?? 0 }
+    func disappearingLabel(for chatKey: String) -> String {
+        let value = disappearing(for: chatKey)
+        return Self.disappearingOptions.first { $0.1 == value }?.0 ?? "Off"
+    }
+    func setDisappearing(_ ms: Int64, for chatKey: String) {
+        guard let store = engine?.store else { return }
+        var map = store.disappearing(); if ms <= 0 { map.removeValue(forKey: chatKey) } else { map[chatKey] = ms }
+        _ = try? store.setDisappearing(map); pruneDisappearing(); refresh()
+    }
+    /// Deletes messages older than each chat's disappearing retention.
+    private func pruneDisappearing(now: Int64 = Envelope.now()) {
+        guard let store = engine?.store else { return }
+        let map = store.disappearing(); guard !map.isEmpty else { return }
+        var doomed: [String] = []
+        for e in store.stored() where e.kind == "text" || e.kind == "media" {
+            let key = e.groupID.map { "g:" + $0 } ?? directChatKey(for: e)
+            guard let key, let retention = map[key], retention > 0, now - e.created > retention else { continue }
+            doomed.append(e.id)
+        }
+        store.delete(ids: doomed)
+    }
+    private func directChatKey(for e: Envelope) -> String? {
+        guard e.groupID == nil else { return nil }
+        if e.sender == identity, let to = e.to { return "c:" + to }
+        if e.to == identity { return "c:" + e.sender }
+        return nil
+    }
+    func deleteCurrentChat() {
+        guard let store = engine?.store else { return }
+        if let group = selectedGroupID { store.deleteGroup(group); var m = store.disappearing(); m.removeValue(forKey: "g:" + group); _ = try? store.setDisappearing(m) }
+        else if let contact = selectedContactID { store.deleteDirect(identity, contact); var m = store.disappearing(); m.removeValue(forKey: "c:" + contact); _ = try? store.setDisappearing(m) }
+        clearSelection(); refresh()
+    }
+    var mediaUsageBytes: Int64 { vault?.usage() ?? 0 }
+    var relayUsage: (count: Int, bytes: Int64) { router?.store.usage() ?? (0, 0) }
+    var storageKeySource: String { database?.secret.source == .file ? "protected key file" : "Keychain" }
+    func clearAllMedia() { vault?.clearAll(); refresh(); status("Cleared stored audio and video files.") }
+    func clearRelayCache() { router?.store.clearCarried(local: identity); relayCarried = router?.carriedCount() ?? 0; status("Cleared the relay cache (messages carried for others).") }
 
     private func transmit(_ data: Data) {
         guard let e = try? Envelope.decode(data), e.sender == identity else { return }
@@ -472,7 +567,7 @@ final class MeshModel: ObservableObject {
         guard let to = e.to, !isConnected(to) else { return "Awaiting delivery" }
         if router?.store.contains(SealedFrame.frameID(inner: e.id, to: to)) == true { return "In the mesh: any connected device can carry it" }
         if e.kind == "media" { return "Waiting for a direct connection (files are not relayed)" }
-        return reachableViaMesh(to) ? "Queued for the mesh" : "Waiting for a direct connection (meet once on v0.5 to enable relay)"
+        return reachableViaMesh(to) ? "Queued for the mesh" : "Waiting for a direct connection (meet once on v0.6 to enable relay)"
     }
     /// SF Symbol for the bubble: queued, travelling through the mesh, or delivered.
     func deliveryIcon(_ e: Envelope) -> String {
@@ -488,19 +583,21 @@ final class MeshModel: ObservableObject {
     }
     private func refresh() {
         guard let engine else { return }
+        pruneDisappearing()
         groups = groupBook?.groups ?? []
-        let active = engine.store.active()
-        messages = Array(active.filter { e in
+        // History (kept until deleted/disappeared), not just the delivery window, drives the UI.
+        let history = engine.store.stored()
+        messages = Array(history.filter { e in
             guard e.kind == "text" || e.kind == "media" else { return false }
             if let selectedGroupID { return e.groupID == selectedGroupID }
             guard e.groupID == nil, let selectedContactID else { return false }
             return (e.sender == identity && e.to == selectedContactID) || (e.sender == selectedContactID && e.to == identity)
         }.suffix(100))
         var grouped: [String: Set<String>] = [:]
-        for e in active where e.kind == "ack" && e.to == identity { if let id = e.ackFor { grouped[id, default: []].insert(e.sender) } }
+        for e in history where e.kind == "ack" && e.to == identity { if let id = e.ackFor { grouped[id, default: []].insert(e.sender) } }
         receipts = grouped
         relayCarried = router?.carriedCount() ?? 0
-        let visible = active.filter { $0.kind == "text" || $0.kind == "media" }
+        let visible = history.filter { $0.kind == "text" || $0.kind == "media" }
         var summaries: [ChatSummary] = []
         for contact in contacts {
             let last = visible.last { $0.groupID == nil && (($0.sender == identity && $0.to == contact.id) || ($0.sender == contact.id && $0.to == identity)) }
@@ -511,7 +608,7 @@ final class MeshModel: ObservableObject {
             summaries.append(ChatSummary(id: "g:" + group.id, title: group.name, tag: nil, verified: false, isGroup: true, preview: preview(last, group: true), lastTime: last?.created, online: false))
         }
         chatList = summaries.sorted { ($0.lastTime ?? 0, $1.title) > ($1.lastTime ?? 0, $0.title) }
-        vault?.prune(keeping: Set(active.compactMap { $0.media?.id }))
+        vault?.prune(keeping: Set(history.compactMap { $0.media?.id }))
     }
     func status(_ text: String) { log.append(text); if log.count > 50 { log.removeFirst(log.count - 50) } }
 }
