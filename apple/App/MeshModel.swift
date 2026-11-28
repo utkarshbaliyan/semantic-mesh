@@ -26,6 +26,9 @@ final class MeshModel: ObservableObject {
     @Published var showGroupEditor = false
     @Published var groupName = ""
     @Published var groupMembers: Set<String> = []
+    @Published var groupError: String?
+    @Published var usernameMessage: String?
+    @Published var usernameFailed = false
     @Published var editingGroupID: String?
     @Published var showImporter = false
     @Published var importKind = "audio"
@@ -174,12 +177,15 @@ final class MeshModel: ObservableObject {
         refresh()
     }
     func saveUsername() {
-        guard let book = contactBook else { return }
+        guard let book = contactBook else { usernameFailed = true; usernameMessage = "Storage unavailable on this device."; return }
         do {
-            try book.setUsername(usernameDraft); let restart = running
-            if restart { stop() }; username = book.username; usernameDraft = book.username
-            if restart { start() }; status("Username saved. It is discoverable nearby, not globally registered.")
-        } catch { status(error.localizedDescription) }
+            try book.setUsername(usernameDraft)
+            username = book.username; usernameDraft = book.username
+            if let profile = try? ChatProfile(id: identity, username: username) { transport?.updateProfile(profile) }
+            usernameFailed = false
+            usernameMessage = "Saved as @\(username). Connected people see the new name after they reconnect."
+            status("Username saved. It is discoverable nearby, not globally registered.")
+        } catch { usernameFailed = true; usernameMessage = error.localizedDescription; status(error.localizedDescription) }
     }
     func start() {
         guard !running, engine != nil, let profile = try? ChatProfile(id: identity, username: username) else { return }
@@ -219,12 +225,20 @@ final class MeshModel: ObservableObject {
     }
     func editGroup(_ group: MeshGroup? = nil) {
         guard !recording, !requestingMicrophone, !preparingMedia else { return }
-        editingGroupID = group?.id; groupName = group?.name ?? ""
+        editingGroupID = group?.id; groupName = group?.name ?? ""; groupError = nil
         groupMembers = Set(group?.members.map(\.id).filter { $0 != identity } ?? [])
         showGroupEditor = true
     }
     func saveGroup() {
-        guard let book = groupBook, let me = try? ChatProfile(id: identity, username: username) else { return }
+        guard let book = groupBook, let me = try? ChatProfile(id: identity, username: username) else {
+            groupError = "Group storage is unavailable on this device."; return
+        }
+        let name = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty { groupError = "Type a group name first."; return }
+        if name.utf16.count > 60 { groupError = "Group name must be 60 characters or fewer."; return }
+        if groupMembers.isEmpty { groupError = "Choose at least one contact to add."; return }
+        if groupMembers.count > 15 { groupError = "Choose at most 15 other members."; return }
+        groupError = nil
         do {
             let old = editingGroupID.flatMap { book.group($0) }
             if let old, old.ownerID != identity { throw FeatureError.ownerOnly }
@@ -232,11 +246,11 @@ final class MeshModel: ObservableObject {
             var members = [me]
             for profile in candidates where groupMembers.contains(profile.id) && !members.contains(where: { $0.id == profile.id }) { members.append(profile) }
             let group = MeshGroup(id: old?.id ?? UUID().uuidString.lowercased(), ownerID: identity,
-                                  name: groupName.trimmingCharacters(in: .whitespacesAndNewlines), revision: (old?.revision ?? 0) + 1, members: members)
+                                  name: name, revision: (old?.revision ?? 0) + 1, members: members)
             try book.apply(group, from: identity); transport?.cancelFiles()
             showGroupEditor = false; groups = book.groups; selectGroup(group.id); sync()
             status("Group saved. Membership changes reach people when they reconnect with you.")
-        } catch { status(error.localizedDescription) }
+        } catch { groupError = error.localizedDescription; status(error.localizedDescription) }
     }
     func chooseMedia(_ kind: String) { guard canCompose, !recording else { return }; importKind = kind; showImporter = true }
     func importFile(_ url: URL, kind: String) {

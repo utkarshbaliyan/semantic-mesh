@@ -30,9 +30,17 @@ struct MeshView: View {
                     GroupBox("Your profile") {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                TextField("Username", text: $mesh.usernameDraft).autocorrectionDisabled()
-                                Button("Save") { mesh.saveUsername() }.disabled(mesh.recording || mesh.preparingMedia)
+                                TextField("Username", text: $mesh.usernameDraft)
+                                    .autocorrectionDisabled()
+                                    #if os(iOS)
+                                    .textInputAutocapitalization(.never)
+                                    #endif
+                                    .onSubmit { mesh.saveUsername() }
+                                    .onChange(of: mesh.usernameDraft) { _, _ in mesh.usernameMessage = nil }
+                                Button("Save") { mesh.saveUsername() }.buttonStyle(.borderedProminent).disabled(mesh.recording || mesh.preparingMedia)
                             }
+                            Text("3–24 characters: lowercase letters, numbers or _ — must start with a letter. Example: utkarsh_2").font(.caption).foregroundStyle(.secondary)
+                            if let message = mesh.usernameMessage { Text(message).font(.callout).foregroundStyle(mesh.usernameFailed ? .red : .green) }
                             Text("@\(mesh.username) · \(mesh.identity.prefix(8))").font(.caption).textSelection(.enabled)
                             Text("Usernames are nearby aliases. Compare device IDs when names match.").font(.caption).foregroundStyle(.secondary)
                         }
@@ -58,7 +66,7 @@ struct MeshView: View {
                 .sheet(isPresented: $mesh.showGroupEditor) { GroupEditor(mesh: mesh) }
                 .sheet(isPresented: $mesh.showPlayer, onDismiss: { mesh.endPlayback() }) {
                     VStack {
-                        VideoPlayer(player: mesh.player).frame(minHeight: 240)
+                        MediaPlayerView(player: mesh.player).frame(minHeight: 240)
                         Button("Close") { mesh.endPlayback() }.padding()
                     }.frame(minWidth: 320).padding()
                 }
@@ -127,7 +135,7 @@ struct GroupsView: View {
                         }
                     }.buttonStyle(.bordered).disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
                 }
-                Button("Create group") { mesh.editGroup() }.disabled(mesh.contacts.isEmpty || mesh.recording || mesh.preparingMedia)
+                Button("Create group") { mesh.editGroup() }.buttonStyle(.borderedProminent).disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
                 Text("The creator manages membership. Members must accept chat requests from one another to exchange messages directly.").font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -149,18 +157,18 @@ struct GroupEditor: View {
                 VStack(alignment: .leading, spacing: 14) {
                     TextField("Group name", text: $mesh.groupName)
                     Text("You are the owner. Choose up to 15 other members.").font(.caption)
+                    if candidates.isEmpty { Text("No contacts yet. Accept a chat request from someone nearby, then add them here.").font(.caption).foregroundStyle(.orange) }
                     ForEach(candidates) { contact in
                         Toggle(contact.label, isOn: Binding(get: { mesh.groupMembers.contains(contact.id) }, set: { included in
                             if included { mesh.groupMembers.insert(contact.id) } else { mesh.groupMembers.remove(contact.id) }
                         }))
                     }
                     Text("Uncheck a member to remove them. Changes reach disconnected devices when they reconnect with you.").font(.caption).foregroundStyle(.secondary)
-                    if let latest = mesh.log.last { Text(latest).font(.caption) }
+                    if let problem = mesh.groupError { Text(problem).font(.callout).foregroundStyle(.red) }
                     HStack {
                         Button("Cancel") { mesh.showGroupEditor = false }
                         Spacer()
                         Button("Save group") { mesh.saveGroup() }.buttonStyle(.borderedProminent)
-                            .disabled(mesh.groupName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || mesh.groupName.utf16.count > 60 || mesh.groupMembers.count > 15)
                     }
                 }.padding()
             }.navigationTitle(mesh.editingGroupID == nil ? "Create group" : "Manage members")
@@ -266,5 +274,26 @@ struct PickedVideo: Transferable {
             return PickedVideo(url: url)
         }
     }
+}
+#endif
+
+/// SwiftUI's VideoPlayer aborts on macOS when its AVKit superclass is not loaded, so the Mac
+/// build hosts AVPlayerView directly. iOS keeps the SwiftUI player.
+#if os(macOS)
+struct MediaPlayerView: NSViewRepresentable {
+    let player: AVPlayer?
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.player = player
+        return view
+    }
+    func updateNSView(_ view: AVPlayerView, context: Context) { if view.player !== player { view.player = player } }
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) { view.player?.pause(); view.player = nil }
+}
+#else
+struct MediaPlayerView: View {
+    let player: AVPlayer?
+    var body: some View { VideoPlayer(player: player) }
 }
 #endif
