@@ -42,13 +42,14 @@ struct MeshView: View {
                             Text("3–24 characters: lowercase letters, numbers or _ — must start with a letter. Example: utkarsh_2").font(.caption).foregroundStyle(.secondary)
                             if let message = mesh.usernameMessage { Text(message).font(.callout).foregroundStyle(mesh.usernameFailed ? .red : .green) }
                             Text("@\(mesh.username) · \(mesh.identity.prefix(8))").font(.caption).textSelection(.enabled)
+                            Text("Safety code: \(mesh.safetyCode)").font(.caption.monospaced()).textSelection(.enabled)
                             Text("Usernames are nearby aliases. Compare device IDs when names match.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     Text("Keep Wi-Fi and Bluetooth enabled and both apps open. Nearby messaging works without internet.").font(.caption)
                     HStack {
                         Button(mesh.running ? "Stop network" : "Start network") { mesh.running ? mesh.stop() : mesh.start() }.buttonStyle(.borderedProminent)
-                        Text("\(mesh.connected.count) connected").font(.caption)
+                        Text("\(mesh.connected.count) connected · carrying \(mesh.relayCarried) for others").font(.caption)
                     }
                     PeopleView(mesh: mesh)
                     GroupsView(mesh: mesh)
@@ -87,7 +88,7 @@ struct PeopleView: View {
             GroupBox("Find people nearby") {
                 VStack(alignment: .leading, spacing: 10) {
                     TextField("Search username or device ID", text: $mesh.search).autocorrectionDisabled()
-                    if mesh.filteredNearby.isEmpty { Text(mesh.running ? "No matching nearby users. Open version 0.4 on the other device." : "Start the network to discover people.").font(.caption).foregroundStyle(.secondary) }
+                    if mesh.filteredNearby.isEmpty { Text(mesh.running ? "No matching nearby users. Open version 0.5 on the other device." : "Start the network to discover people.").font(.caption).foregroundStyle(.secondary) }
                     ForEach(mesh.filteredNearby) { peer in
                         HStack {
                             Text(peer.name).font(.subheadline)
@@ -110,7 +111,7 @@ struct PeopleView: View {
                                 Image(systemName: mesh.selectedContactID == contact.id ? "checkmark.circle.fill" : "person.crop.circle")
                                 Text(contact.label)
                                 Spacer()
-                                Text(mesh.isConnected(contact.id) ? "Nearby" : "Offline").font(.caption)
+                                Text(mesh.isConnected(contact.id) ? "Nearby" : mesh.reachableViaMesh(contact.id) ? "Via mesh" : "Offline").font(.caption)
                             }
                         }.buttonStyle(.bordered).disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
                     }

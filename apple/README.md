@@ -1,8 +1,24 @@
 # Mac ↔ iPhone nearby messaging
 
-Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled and the apps open. Messaging works without internet, within local wireless range. It cannot reach someone 100 km away. Android uses a different transport and cannot connect to the Apple app yet.
+Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled and the apps open. Messaging works without internet. Text can now hop across other people's devices (multi-hop mesh), so range grows with the number of connected devices in between. It still cannot reach someone 100 km away without a chain of devices or a carrier who travels there within the hour. Android uses a different transport and cannot connect to the Apple app yet.
 
-## Version 0.4: one complete update
+## Version 0.5: multi-hop mesh
+
+- **Relay through other devices.** If a contact is not directly connected, text, delivery receipts and group membership updates are sealed into an end-to-end encrypted, signed frame. Any connected device running v0.5 stores and forwards it (up to 8 hops, for up to 1 hour). A device that carries a message and later meets the recipient delivers it (store-and-forward).
+- **End-to-end protection.** Each device has long-term Curve25519 keys (`node-keys.json`). Keys are exchanged automatically over the first direct v0.5 connection and pinned (trust on first use); a later key change is rejected. Relays only see sender ID, recipient ID, expiry and hop count, never the content. Compare the **Safety code** under your username in person to rule out an impersonated first connection.
+- Contacts show **Via mesh** once keys are exchanged. Outgoing messages show **In the mesh** while being carried. The header shows how many messages you carry for others.
+- Audio/video files are not relayed. They still need a direct connection.
+- Relays only use links you already approved with **Request chat**. Strangers' devices do not join automatically yet.
+- v0.5 uses a new discovery version and does not see v0.4 devices. Update every device.
+
+### Test multi-hop with 3 devices
+
+1. Install v0.5 on Mac, iPhone and iPad. Start the network on all three and accept chat requests for every pair (Mac↔iPhone, Mac↔iPad, iPhone↔iPad). The log shows "Mesh keys saved" for each contact.
+2. Quit and reopen the app on iPhone and iPad (this drops their direct link). Start the network on both, then reconnect each **only to the Mac**. Do not reconnect iPhone↔iPad.
+3. On iPhone, open the iPad chat (shows **Via mesh**) and send text. The iPad receives it and its log shows "Received through the mesh (2 hops)". The iPhone shows **Delivered to app** once the receipt comes back through the Mac, and the Mac header shows it is carrying messages.
+4. Store-and-forward: stop the network on the iPad, send from iPhone (shows **In the mesh**), then start the iPad network and reconnect it to the Mac. It should arrive exactly once.
+
+## Version 0.4
 
 - Local usernames, explicit chat requests, saved contacts and direct conversations.
 - Named groups, up to 16 members including the creator. The creator adds/removes members and renames the group.
@@ -46,7 +62,7 @@ Groups send directly to their current members. Each pair of members must have ac
 - A media receipt is generated after the complete file is stored and its size and SHA-256 digest match the metadata. A receipt means delivered to an app, not read by a person.
 - The creator sends versioned membership updates to current and removed members. Removed members cannot send/receive new group traffic once the update is applied. Disconnected devices can retain an older membership view until they reconnect with the creator; instantaneous offline revocation is impossible here. Already delivered messages/files cannot be recalled.
 - Changing membership stops replay of queued messages from the previous revision. The composer shows this in delivery status; send a new message after the update if needed.
-- Sessions are encrypted. Identities and usernames are self-claimed, without signed accounts or end-to-end identity authentication. Compare device IDs in person. This is a prototype, not a secure replacement for an established messenger.
+- Direct sessions are encrypted by Multipeer. Relayed frames are end-to-end encrypted (X25519 + ChaCha20-Poly1305) and signed (Ed25519) with keys pinned on first direct contact. There is no forward secrecy yet, and the first key exchange is only as trustworthy as that direct link; compare safety codes in person. Usernames are self-claimed. This is a prototype, not a secure replacement for an established messenger.
 - JSON frames remain capped at 16 KiB, text at 2,000 UTF-16 units, message store at 5,000 live envelopes, groups at 100 and contacts at 500. Clocks must roughly agree. Storage errors disable sending rather than erase history.
 
 ## Verification
@@ -57,9 +73,9 @@ apple/scripts/build-mac.sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test --package-path apple
 ```
 
-The 23 core checks cover the original protocol/relay behavior, contact gates, persistence, owner-only group changes, conflicting/stale revisions, removed-member rejection, membership audiences, attachment integrity/path/size/quota checks, delayed media receipts, group receipts and emoji bounds. Native Mac and unsigned iPhone builds are checked separately; GitHub Actions also compiles the iOS Simulator target.
+The 28 core checks cover sealed-frame encryption and tamper rejection, four-node chain delivery without backflow, carrier store-and-forward, forged-frame dropping, key pinning, the original protocol/relay behavior, contact gates, persistence, owner-only group changes, conflicting/stale revisions, removed-member rejection, membership audiences, attachment integrity/path/size/quota checks, delayed media receipts, group receipts and emoji bounds. Native Mac and unsigned iPhone builds are checked separately; GitHub Actions also compiles the iOS Simulator target.
 
-Real group delivery, microphone recording, photo-picker behavior and media playback still need physical-device testing. UI automation was unavailable on the development Mac. The core's simulated three-node relay does not prove physical mesh routing, and the chat UI does not relay messages.
+Real group delivery, microphone recording, photo-picker behavior and media playback still need physical-device testing. UI automation was unavailable on the development Mac. Simulated relays do not prove physical mesh routing; use the 3-device test above.
 
 ## Physical acceptance test
 

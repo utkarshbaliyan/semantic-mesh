@@ -40,6 +40,7 @@ final class MeshModel: ObservableObject {
     #endif
     @Published var player: AVPlayer?
     @Published var showPlayer = false
+    @Published var relayCarried = 0
     let identity: String
     private var contactBook: ContactBook?
     private var groupBook: GroupBook?
@@ -47,6 +48,9 @@ final class MeshModel: ObservableObject {
     private var invitationReply: ((Bool) -> Void)?
     private var transport: MultipeerTransport?
     private var engine: MeshEngine?
+    private var nodeKeys: NodeKeys?
+    private var router: RelayRouter?
+    private static let relayKinds: Set<String> = ["text", "ack", "group"]
     private var timer: Timer?
     private let recorder = VoiceRecorder()
 
@@ -79,6 +83,8 @@ final class MeshModel: ObservableObject {
             contactBook = try ContactBook(file: directory.appendingPathComponent("contacts.json"), defaultUsername: "mesh_" + nodeID.prefix(6))
             groupBook = try GroupBook(file: directory.appendingPathComponent("groups.json"))
             vault = try MediaVault(directory: directory.appendingPathComponent("media"))
+            nodeKeys = try NodeKeys(file: directory.appendingPathComponent("node-keys.json"))
+            router = RelayRouter(local: nodeID, store: try RelayStore(file: directory.appendingPathComponent("relay.json")))
             engine = MeshEngine(identity: nodeID, store: storage)
         } catch { storageError = error; engine = nil }
         identity = nodeID
@@ -88,6 +94,8 @@ final class MeshModel: ObservableObject {
             engine.authorizeIncoming = { [weak self] e, peer in self?.authorized(e, from: peer) == true }
             engine.received = { [weak self] _ in self?.refresh() }
             engine.error = { [weak self] error in self?.status(error.localizedDescription) }
+            router?.send = { [weak self] data, peer in self?.transport?.send(data, to: peer) }
+            router?.keysFor = { [weak self] id in self?.contactBook?.keys(for: id) }
             refresh()
         } else { status("Storage unavailable: \(storageError?.localizedDescription ?? "unknown error"). Sending is disabled.") }
     }
@@ -101,10 +109,49 @@ final class MeshModel: ObservableObject {
             guard let group = groupBook?.group(id), group.contains(identity), group.revision == e.groupRevision else { return }
             for member in group.members where member.id != identity && contactBook?.profile(for: member.id) != nil {
                 var addressed = e; addressed.to = member.id
-                if let frame = try? addressed.encoded() { transport?.send(frame, to: member.id) }
+                deliver(addressed)
             }
-        } else if let to = e.to, contactBook?.profile(for: to) != nil { transport?.send(data, to: to) }
+        } else if let to = e.to, contactBook?.profile(for: to) != nil { deliver(e) }
     }
+    /// Direct link when the recipient is connected; otherwise an end-to-end sealed frame any device can carry.
+    /// Media files still need a direct link.
+    private func deliver(_ e: Envelope) {
+        guard let to = e.to else { return }
+        if isConnected(to) { if let frame = try? e.encoded() { transport?.send(frame, to: to) }; return }
+        guard Self.relayKinds.contains(e.kind), let keys = contactBook?.keys(for: to), let nodeKeys, let router,
+              !router.store.contains(SealedFrame.frameID(inner: e.id, to: to)), !acknowledged(e, by: to) else { return }
+        do { try router.originate(SealedFrame.seal(e, keys: nodeKeys, recipient: keys)) }
+        catch { status("Mesh relay: \(error.localizedDescription)") }
+    }
+    private func acknowledged(_ e: Envelope, by peer: String) -> Bool {
+        e.kind != "ack" && engine?.store.active().contains { $0.kind == "ack" && $0.ackFor == e.id && $0.sender == peer } == true
+    }
+    private func relayed(_ frame: SealedFrame, from peer: String) {
+        guard let router, let nodeKeys else { return }
+        do {
+            switch try router.accept(frame, from: peer) {
+            case .duplicate: return
+            case .carried: relayCarried = router.carriedCount()
+            case .forMe:
+                guard let keys = contactBook?.keys(for: frame.from) else { status("Dropped a relayed message from an unverified sender."); return }
+                let e = try frame.open(keys: nodeKeys, local: identity, sender: keys)
+                guard Self.relayKinds.contains(e.kind) else { return }
+                try process(e, data: e.encoded(), from: frame.from)
+                if e.kind == "text" { status("Received through the mesh (\(frame.hops) hop\(frame.hops == 1 ? "" : "s")).") }
+            }
+        } catch { status(error.localizedDescription) }
+    }
+    private func pinKeys(_ note: KeyAnnouncement, from peer: String) {
+        guard note.id == peer, let book = contactBook, book.profile(for: peer) != nil else { return }
+        do {
+            if try book.pin(note.keys, for: peer) {
+                status("Mesh keys saved for @\(book.profile(for: peer)?.username ?? "contact") (safety code \(note.keys.fingerprint)). They can now be reached through other devices.")
+                sync()
+            }
+        } catch { status(error.localizedDescription) }
+    }
+    var safetyCode: String { nodeKeys?.publicKeys.fingerprint ?? "unavailable" }
+    func reachableViaMesh(_ id: String) -> Bool { contactBook?.keys(for: id) != nil }
     private func authorized(_ e: Envelope, from peer: String) -> Bool {
         guard e.expires > Envelope.now(), contactBook?.allows(e, localIdentity: identity, peerIdentity: peer) == true else { return false }
         switch e.kind {
@@ -127,8 +174,13 @@ final class MeshModel: ObservableObject {
         }
     }
     private func receive(_ data: Data, from peer: String) {
+        if let frame = try? SealedFrame.decode(data) { relayed(frame, from: peer); return }
+        if let note = try? KeyAnnouncement.decode(data) { pinKeys(note, from: peer); return }
+        do { try process(Envelope.decode(data), data: data, from: peer) } catch { status(error.localizedDescription) }
+    }
+    /// `peer` is the authenticated author: the direct link, or the verified sender of a sealed frame.
+    private func process(_ e: Envelope, data: Data, from peer: String) throws {
         do {
-            let e = try Envelope.decode(data)
             guard authorized(e, from: peer), let engine else { return }
             switch e.kind {
             case "group":
@@ -173,6 +225,11 @@ final class MeshModel: ObservableObject {
             let updates = engine.store.active().filter { $0.kind == "group" }
             for e in updates { if let data = try? e.encoded() { transmit(data) } }
             engine.sync()
+            router?.flush()
+            // Re-announced every sync: the other side may not have saved us as a contact yet on first connect.
+            if let keys = nodeKeys?.publicKeys, let note = try? JSONEncoder().encode(KeyAnnouncement(id: identity, keys: keys)) {
+                for peer in connected { transport?.send(note, to: peer.id) }
+            }
         }
         refresh()
     }
@@ -197,7 +254,12 @@ final class MeshModel: ObservableObject {
             do { try book.accept(profile); self.contacts = book.contacts; if self.selectedContactID == nil && self.selectedGroupID == nil { self.selectContact(profile.id) }; return true }
             catch { self.status("Could not save contact: \(error.localizedDescription)"); return false }
         }
-        transport.connectionChanged = { [weak self] peers in self?.connected = peers; self?.sync() }
+        transport.connectionChanged = { [weak self] peers in
+            guard let self else { return }
+            self.connected = peers
+            self.router?.setPeers(Set(peers.map(\.id)))
+            self.sync()
+        }
         transport.requestChanged = { [weak self] id, pending in if pending { self?.pendingRequests.insert(id) } else { self?.pendingRequests.remove(id) } }
         transport.incoming = { [weak self] data, peer in self?.receive(data, from: peer) }
         transport.allowResource = { [weak self] name, peer in self?.attachment(name, from: peer) != nil }
@@ -206,12 +268,12 @@ final class MeshModel: ObservableObject {
         transport.invitation = { [weak self] profile, reply in guard let self, self.invitationReply == nil else { reply(false); return }; self.invitationReply = reply; self.pendingInvitation = profile }
         running = true; transport.start()
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.sync() }
-        status("Nearby discovery started. Use version 0.4 on both devices.")
+        status("Nearby discovery started. Use version 0.5 on every device.")
     }
     func stop() {
         answerInvitation(false); recorder.cancel(); recording = false; requestingMicrophone = false
         timer?.invalidate(); timer = nil; transport?.stop(); transport = nil
-        running = false; nearby = []; connected = []; pendingRequests = []
+        running = false; nearby = []; connected = []; pendingRequests = []; router?.setPeers([])
     }
     func invite(_ peer: NearbyPeer) { if !pendingRequests.contains(peer.id) { transport?.invite(peer) } }
     func answerInvitation(_ accept: Bool) { let reply = invitationReply; invitationReply = nil; pendingInvitation = nil; reply?(accept) }
@@ -294,7 +356,11 @@ final class MeshModel: ObservableObject {
             if groupBook?.group(id)?.revision != e.groupRevision { return delivered + "; queued delivery stopped after membership changed" }
             return delivered
         }
-        return count > 0 ? "Delivered to app" : "Awaiting delivery"
+        if count > 0 { return "Delivered to app" }
+        guard let to = e.to, !isConnected(to) else { return "Awaiting delivery" }
+        if router?.store.contains(SealedFrame.frameID(inner: e.id, to: to)) == true { return "In the mesh: any connected device can carry it" }
+        if e.kind == "media" { return "Waiting for a direct connection (files are not relayed)" }
+        return reachableViaMesh(to) ? "Queued for the mesh" : "Waiting for a direct connection (meet once on v0.5 to enable relay)"
     }
     private func refresh() {
         guard let engine else { return }
@@ -309,6 +375,7 @@ final class MeshModel: ObservableObject {
         var grouped: [String: Set<String>] = [:]
         for e in active where e.kind == "ack" && e.to == identity { if let id = e.ackFor { grouped[id, default: []].insert(e.sender) } }
         receipts = grouped
+        relayCarried = router?.carriedCount() ?? 0
         vault?.prune(keeping: Set(active.compactMap { $0.media?.id }))
     }
     func status(_ text: String) { log.append(text); if log.count > 50 { log.removeFirst(log.count - 50) } }

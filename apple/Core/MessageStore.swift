@@ -62,7 +62,7 @@ public enum ProfileError: Error, LocalizedError {
 }
 
 public final class ContactBook {
-    private struct State: Codable { var username: String; var contacts: [ChatProfile] }
+    private struct State: Codable { var username: String; var contacts: [ChatProfile]; var keys: [String: PeerKeys]? = nil }
     private let file: URL
     private var state: State
     public var username: String { state.username }
@@ -76,9 +76,19 @@ public final class ContactBook {
             guard state.contacts.count <= 500 else { throw ProfileError.tooManyContacts }
             state.contacts = try state.contacts.map { try $0.validated() }
             guard Set(state.contacts.map(\.id)).count == state.contacts.count else { throw ProfileError.invalidIdentity }
+            for (id, keys) in state.keys ?? [:] { guard state.contacts.contains(where: { $0.id == id }) else { throw ProfileError.invalidIdentity }; try keys.validate() }
         } else { state = State(username: try ChatProfile.normalize(defaultUsername), contacts: []); try save(state) }
     }
     public func profile(for id: String) -> ChatProfile? { state.contacts.first { $0.id == id } }
+    public func keys(for id: String) -> PeerKeys? { state.keys?[id] }
+    /// Trust on first use: the first keys received over an approved direct link are pinned; later changes are refused.
+    @discardableResult public func pin(_ keys: PeerKeys, for id: String) throws -> Bool {
+        try keys.validate()
+        guard profile(for: id) != nil else { throw ProfileError.invalidIdentity }
+        if let old = state.keys?[id] { guard old == keys else { throw RelayError.keyMismatch }; return false }
+        var next = state; var all = next.keys ?? [:]; all[id] = keys; next.keys = all
+        try save(next); state = next; return true
+    }
     public func setUsername(_ username: String) throws {
         var next = state; next.username = try ChatProfile.normalize(username)
         try save(next); state = next

@@ -42,7 +42,7 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         advertiser.delegate = self; browser.delegate = self
     }
     private static func makeAdvertiser(_ peer: MCPeerID, _ profile: ChatProfile) -> MCNearbyServiceAdvertiser {
-        MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: ["protocol": "1", "chat": "2", "id": profile.id, "username": profile.username], serviceType: "semantic-mesh")
+        MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: ["protocol": "1", "chat": "3", "id": profile.id, "username": profile.username], serviceType: "semantic-mesh")
     }
     /// Re-advertises the new username without dropping existing chat sessions.
     func updateProfile(_ profile: ChatProfile) {
@@ -111,7 +111,7 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     private func publishConnections() { connectionChanged(connectedPeers().compactMap { approved[$0] }) }
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "2",
+            guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "3",
                   let id = info?["id"], let username = info?["username"],
                   let profile = try? ChatProfile(id: id, username: username), profile.id != self.localProfile.id else { return }
             self.discovered(NearbyPeer(profile: profile, peer: peerID))

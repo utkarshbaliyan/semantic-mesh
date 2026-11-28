@@ -19,6 +19,8 @@
 		000000000000000000000023 /* Core/Envelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000004 /* Core/Envelope.swift */; };
 		000000000000000000000024 /* Core/MeshEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000005 /* Core/MeshEngine.swift */; };
 		000000000000000000000025 /* Core/MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000006 /* Core/MessageStore.swift */; };
+		0000000000000000000000A2 /* Core/Relay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000A1 /* Core/Relay.swift */; };
+		0000000000000000000000A3 /* Core/Relay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0000000000000000000000A1 /* Core/Relay.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +35,7 @@
 		000000000000000000000009 /* App/Mac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = App/Mac.entitlements; sourceTree = SOURCE_ROOT; };
 		000000000000000000000011 /* SemanticMesh.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SemanticMesh.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		00000000000000000000001F /* SemanticMeshMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SemanticMeshMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0000000000000000000000A1 /* Core/Relay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Relay.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -62,6 +65,7 @@
 				000000000000000000000004 /* Core/Envelope.swift */,
 				000000000000000000000005 /* Core/MeshEngine.swift */,
 				000000000000000000000006 /* Core/MessageStore.swift */,
+				0000000000000000000000A1 /* Core/Relay.swift */,
 				000000000000000000000007 /* App/MacInfo.plist */,
 				000000000000000000000008 /* App/iOSInfo.plist */,
 				000000000000000000000009 /* App/Mac.entitlements */,
@@ -170,6 +174,7 @@
 				000000000000000000000015 /* Core/Envelope.swift in Sources */,
 				000000000000000000000016 /* Core/MeshEngine.swift in Sources */,
 				000000000000000000000017 /* Core/MessageStore.swift in Sources */,
+				0000000000000000000000A2 /* Core/Relay.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -183,6 +188,7 @@
 				000000000000000000000023 /* Core/Envelope.swift in Sources */,
 				000000000000000000000024 /* Core/MeshEngine.swift in Sources */,
 				000000000000000000000025 /* Core/MessageStore.swift in Sources */,
+				0000000000000000000000A3 /* Core/Relay.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -324,6 +324,108 @@ final class CoreTests: TestBase {
         XCTAssertThrowsError(try Envelope.message(sender: e.sender, text: String(repeating: "😀", count: 1001), now: now))
     }
 
+    // MARK: Multi-hop relay
+    private func relayRouter(_ id: String) throws -> RelayRouter {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return RelayRouter(local: id, store: try RelayStore(file: directory.appendingPathComponent("relay.json")))
+    }
+    func testSealedFrameRoundTripAndTamperRejection() throws {
+        let a = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased(), c = UUID().uuidString.lowercased()
+        let aKeys = NodeKeys(), bKeys = NodeKeys(), cKeys = NodeKeys()
+        let e = try Envelope.message(sender: a, text: "secret 🔒", to: b, now: now)
+        var frame = try SealedFrame.seal(e, keys: aKeys, recipient: bKeys.publicKeys)
+        XCTAssertFalse(String(decoding: try frame.encoded(), as: UTF8.self).contains("secret"))
+        XCTAssertEqual(try frame.open(keys: bKeys, local: b, sender: aKeys.publicKeys, now: now).text, "secret 🔒")
+        frame = try frame.forwarded().forwarded()
+        XCTAssertEqual(try SealedFrame.decode(frame.encoded(), now: now).open(keys: bKeys, local: b, sender: aKeys.publicKeys, now: now).id, e.id)
+        XCTAssertThrowsError(try frame.open(keys: cKeys, local: c, sender: aKeys.publicKeys, now: now), "wrong recipient")
+        XCTAssertThrowsError(try frame.open(keys: bKeys, local: b, sender: cKeys.publicKeys, now: now), "wrong sender keys")
+        var json = try JSONSerialization.jsonObject(with: frame.encoded()) as! [String: Any]
+        json["from"] = c
+        let spoofed = try SealedFrame.decode(JSONSerialization.data(withJSONObject: json), now: now)
+        XCTAssertThrowsError(try spoofed.open(keys: bKeys, local: b, sender: aKeys.publicKeys, now: now), "spoofed sender")
+        json = try JSONSerialization.jsonObject(with: frame.encoded()) as! [String: Any]
+        var box = Data(base64Encoded: json["box"] as! String)!; box[box.count - 1] ^= 1; json["box"] = box.base64EncodedString()
+        let corrupted = try SealedFrame.decode(JSONSerialization.data(withJSONObject: json), now: now)
+        XCTAssertFalse(corrupted.verify(aKeys.publicKeys))
+        XCTAssertThrowsError(try corrupted.open(keys: bKeys, local: b, sender: aKeys.publicKeys, now: now), "corrupted box")
+        XCTAssertEqual(SealedFrame.frameID(inner: e.id, to: b), frame.id)
+        XCTAssertEqual(try SealedFrame.seal(e, keys: aKeys, recipient: bKeys.publicKeys).id, frame.id)
+    }
+    func testFourNodeChainDeliversOnceWithoutBackflow() throws {
+        let ids = (0..<4).map { _ in UUID().uuidString.lowercased() }
+        let routers = try ids.map { try relayRouter($0) }
+        let keys = ids.map { _ in NodeKeys() }
+        var queue: [(Int, Data, String)] = []
+        var sends: [String] = []
+        for (i, router) in routers.enumerated() {
+            router.send = { data, peer in sends.append(ids[i] + ">" + peer); queue.append((ids.firstIndex(of: peer)!, data, ids[i])) }
+        }
+        // Chain: 0 - 1 - 2 - 3. Node 0 cannot see node 3.
+        routers[0].setPeers([ids[1]], now: now); routers[1].setPeers([ids[0], ids[2]], now: now)
+        routers[2].setPeers([ids[1], ids[3]], now: now); routers[3].setPeers([ids[2]], now: now)
+        let e = try Envelope.message(sender: ids[0], text: "far away", to: ids[3], now: now)
+        try routers[0].originate(SealedFrame.seal(e, keys: keys[0], recipient: keys[3].publicKeys), now: now)
+        var delivered: [Envelope] = []; var hops: [Int] = []; var steps = 0
+        while !queue.isEmpty {
+            let (target, data, source) = queue.removeFirst(); steps += 1; XCTAssertLessThan(steps, 50)
+            let frame = try SealedFrame.decode(data, now: now)
+            if try routers[target].accept(frame, from: source, now: now) == .forMe {
+                delivered.append(try frame.open(keys: keys[target], local: ids[target], sender: keys[0].publicKeys, now: now)); hops.append(frame.hops)
+            }
+        }
+        XCTAssertEqual(delivered.map(\.text), ["far away"]); XCTAssertEqual(hops, [3])
+        XCTAssertEqual(sends, [ids[0] + ">" + ids[1], ids[1] + ">" + ids[2], ids[2] + ">" + ids[3]])
+        XCTAssertEqual(routers[1].carriedCount(now: now) + routers[2].carriedCount(now: now), 2)
+        routers[1].flush(now: now); routers[2].flush(now: now)
+        XCTAssertTrue(queue.isEmpty)
+        let again = try SealedFrame.seal(e, keys: keys[0], recipient: keys[3].publicKeys).forwarded()
+        XCTAssertEqual(try routers[3].accept(again, from: ids[2], now: now), .duplicate)
+    }
+    func testCarrierDeliversAfterMovingToDestination() throws {
+        let a = UUID().uuidString.lowercased(), carrier = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased()
+        let aKeys = NodeKeys(), bKeys = NodeKeys()
+        let ra = try relayRouter(a), rc = try relayRouter(carrier), rb = try relayRouter(b)
+        ra.send = { data, _ in _ = try? rc.accept(SealedFrame.decode(data, now: self.now), from: a, now: self.now) }
+        var received: [SealedFrame] = []
+        rc.send = { data, peer in if peer == b, let f = try? SealedFrame.decode(data, now: self.now), (try? rb.accept(f, from: carrier, now: self.now)) == .forMe { received.append(f) } }
+        ra.setPeers([carrier], now: now); rc.setPeers([a], now: now)
+        let e = try Envelope.message(sender: a, text: "carry me", to: b, now: now)
+        try ra.originate(SealedFrame.seal(e, keys: aKeys, recipient: bKeys.publicKeys), now: now)
+        XCTAssertEqual(rc.carriedCount(now: now), 1); XCTAssertTrue(received.isEmpty)
+        rc.setPeers([b], now: now) // carrier walks away from A and meets B
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(try received[0].open(keys: bKeys, local: b, sender: aKeys.publicKeys, now: now).text, "carry me")
+        let expired = e.expires + 1
+        XCTAssertTrue(rc.store.active(now: expired).isEmpty)
+    }
+    func testRelayDropsForgedFramesFromKnownSenders() throws {
+        let a = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased(), relay = UUID().uuidString.lowercased()
+        let aKeys = NodeKeys(), impostor = NodeKeys(), bKeys = NodeKeys()
+        let router = try relayRouter(relay)
+        router.keysFor = { $0 == a ? aKeys.publicKeys : nil }
+        let forged = try SealedFrame.seal(Envelope.message(sender: a, text: "fake", to: b, now: now), keys: impostor, recipient: bKeys.publicKeys)
+        XCTAssertThrowsError(try router.accept(forged, from: UUID().uuidString, now: now))
+        XCTAssertEqual(router.carriedCount(now: now), 0)
+    }
+    func testContactKeysPinnedOnFirstUse() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("contacts.json")
+        let book = try ContactBook(file: file, defaultUsername: "local_user")
+        let peer = try ChatProfile(id: UUID().uuidString, username: "peer_one")
+        let keys = NodeKeys().publicKeys
+        XCTAssertThrowsError(try book.pin(keys, for: peer.id), "not a contact")
+        try book.accept(peer)
+        XCTAssertTrue(try book.pin(keys, for: peer.id)); XCTAssertFalse(try book.pin(keys, for: peer.id))
+        XCTAssertThrowsError(try book.pin(NodeKeys().publicKeys, for: peer.id), "changed keys")
+        XCTAssertEqual(try ContactBook(file: file, defaultUsername: "local_user").keys(for: peer.id), keys)
+        let nodeFile = directory.appendingPathComponent("node-keys.json")
+        XCTAssertEqual(try NodeKeys(file: nodeFile).publicKeys, try NodeKeys(file: nodeFile).publicKeys)
+        XCTAssertEqual(keys.fingerprint.count, 14)
+    }
+
 }
 
 #if CORE_CHECKS
@@ -353,7 +455,12 @@ final class CoreTests: TestBase {
             ("Media quota", checks.testMediaQuotaRejectsNewFiles),
             ("Verified media receipt and deduplication", checks.testMediaReceiptOnlyAfterExplicitVerificationAndIsDeduplicated),
             ("Group receipt revision", checks.testGroupReceiptPreservesMembershipRevision),
-            ("Emoji and UTF16 bounds", checks.testEmojiRoundTripAndUTF16Limit)
+            ("Emoji and UTF16 bounds", checks.testEmojiRoundTripAndUTF16Limit),
+            ("Sealed frame encryption and tamper rejection", checks.testSealedFrameRoundTripAndTamperRejection),
+            ("Four-node chain, single delivery, no backflow", checks.testFourNodeChainDeliversOnceWithoutBackflow),
+            ("Carrier store-and-forward", checks.testCarrierDeliversAfterMovingToDestination),
+            ("Forged relay frames dropped", checks.testRelayDropsForgedFramesFromKnownSenders),
+            ("Contact keys pinned on first use", checks.testContactKeysPinnedOnFirstUse)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
         print("\(tests.count) core checks passed. Physical radio delivery is not covered.")
