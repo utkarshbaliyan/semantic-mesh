@@ -4,6 +4,11 @@ Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled a
 
 ## Version 0.5: multi-hop mesh
 
+- **New messenger layout on Mac, iPhone and iPad.** A chat list (contacts and groups, newest first, with last-message previews and a nearby indicator) beside the open chat on Mac/iPad, push navigation on iPhone. Toolbar: **Find people**, **New group**, **Settings**.
+- **Every chat has the full composer:** attach audio/video (and Photos video on iPhone/iPad), emoji, text, and a mic button that turns into a recording bar with timer, cancel and send. Message bubbles show time and a status icon (clock = queued, mesh icon = being relayed, check = delivered); long-press or right-click for details.
+- **Chat info:** contact device ID and safety code, or group members, owner and member management, plus the chat's media.
+- **Settings:** account (username), security codes, mesh on/off and status, limits, and the network log.
+
 - **Relay through other devices.** If a contact is not directly connected, text, delivery receipts and group membership updates are sealed into an end-to-end encrypted, signed frame. Any connected device running v0.5 stores and forwards it (up to 8 hops, for up to 1 hour). A device that carries a message and later meets the recipient delivers it (store-and-forward).
 - **End-to-end protection.** Each device has long-term Curve25519 keys (`node-keys.json`). Keys are exchanged automatically over the first direct v0.5 connection and pinned (trust on first use); a later key change is rejected. Relays only see sender ID, recipient ID, expiry and hop count, never the content. Compare the **Safety code** under your username in person to rule out an impersonated first connection.
 - Contacts show **Via mesh** once keys are exchanged. Outgoing messages show **In the mesh** while being carried. The header shows how many messages you carry for others.

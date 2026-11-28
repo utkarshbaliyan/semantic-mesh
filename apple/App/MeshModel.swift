@@ -6,7 +6,18 @@ import PhotosUI
 import SwiftUI
 #endif
 
+struct ChatSummary: Identifiable, Equatable {
+    let id: String
+    let title: String
+    let isGroup: Bool
+    let preview: String
+    let lastTime: Int64?
+    let online: Bool
+}
+
 final class MeshModel: ObservableObject {
+    @Published var chatList: [ChatSummary] = []
+    @Published var chatSearch = ""
     @Published var draft = ""
     @Published var search = ""
     @Published var usernameDraft = ""
@@ -57,7 +68,34 @@ final class MeshModel: ObservableObject {
     var selectedContact: ChatProfile? { contacts.first { $0.id == selectedContactID } }
     var selectedGroup: MeshGroup? { groups.first { $0.id == selectedGroupID } }
     var canCompose: Bool { running && (selectedContact != nil || selectedGroup?.contains(identity) == true) }
-    var chatTitle: String { selectedGroup?.name ?? selectedContact.map { "Chat with @" + $0.username } ?? "Select a chat" }
+    var chatTitle: String { selectedGroup?.name ?? selectedContact.map { "@" + $0.username } ?? "Chats" }
+    var filteredChats: [ChatSummary] {
+        let term = chatSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return term.isEmpty ? chatList : chatList.filter { $0.title.lowercased().contains(term) }
+    }
+    /// "c:<contact id>" or "g:<group id>", for list selection.
+    var selectedChatKey: String? {
+        get { selectedGroupID.map { "g:" + $0 } ?? selectedContactID.map { "c:" + $0 } }
+        set {
+            guard newValue != selectedChatKey else { return }
+            guard let value = newValue else { clearSelection(); return }
+            if value.hasPrefix("g:") { selectGroup(String(value.dropFirst(2))) }
+            else if value.hasPrefix("c:") { selectContact(String(value.dropFirst(2))) }
+        }
+    }
+    func clearSelection() { guard !recording, !requestingMicrophone, !preparingMedia else { return }; selectedContactID = nil; selectedGroupID = nil; draft = ""; refresh() }
+    var chatNotice: String? {
+        if let group = selectedGroup, !group.contains(identity) { return "You were removed from this group." }
+        if !running { return "Mesh is off. Turn it on from the chat list to send and receive." }
+        if let contact = selectedContact, !isConnected(contact.id) {
+            return reachableViaMesh(contact.id) ? "Not nearby. Text travels through the mesh; files need a direct connection."
+                                                : "Offline. Messages are delivered when you reconnect within one hour."
+        }
+        if messages.isEmpty { return "Messages and files expire after one hour." }
+        return nil
+    }
+    func reachability(_ id: String) -> String { isConnected(id) ? "Nearby" : reachableViaMesh(id) ? "Via mesh" : "Offline" }
+    func safetyCode(for id: String) -> String? { contactBook?.keys(for: id)?.fingerprint }
     var filteredNearby: [NearbyPeer] {
         let term = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().replacingOccurrences(of: "@", with: "")
         return nearby.filter { term.isEmpty || $0.profile.username.contains(term) || $0.id.hasPrefix(term) }
@@ -89,7 +127,7 @@ final class MeshModel: ObservableObject {
         } catch { storageError = error; engine = nil }
         identity = nodeID
         if let engine, let book = contactBook {
-            username = book.username; usernameDraft = book.username; contacts = book.contacts; selectedContactID = contacts.first?.id
+            username = book.username; usernameDraft = book.username; contacts = book.contacts
             engine.transmit = { [weak self] data, _ in self?.transmit(data) }
             engine.authorizeIncoming = { [weak self] e, peer in self?.authorized(e, from: peer) == true }
             engine.received = { [weak self] _ in self?.refresh() }
@@ -251,7 +289,7 @@ final class MeshModel: ObservableObject {
         transport.lost = { [weak self] name in self?.nearby.removeAll { $0.peer.displayName == name } }
         transport.connected = { [weak self] profile in
             guard let self, let book = self.contactBook else { return false }
-            do { try book.accept(profile); self.contacts = book.contacts; if self.selectedContactID == nil && self.selectedGroupID == nil { self.selectContact(profile.id) }; return true }
+            do { try book.accept(profile); self.contacts = book.contacts; return true }
             catch { self.status("Could not save contact: \(error.localizedDescription)"); return false }
         }
         transport.connectionChanged = { [weak self] peers in
@@ -362,6 +400,18 @@ final class MeshModel: ObservableObject {
         if e.kind == "media" { return "Waiting for a direct connection (files are not relayed)" }
         return reachableViaMesh(to) ? "Queued for the mesh" : "Waiting for a direct connection (meet once on v0.5 to enable relay)"
     }
+    /// SF Symbol for the bubble: queued, travelling through the mesh, or delivered.
+    func deliveryIcon(_ e: Envelope) -> String {
+        if (receipts[e.id]?.count ?? 0) > 0 { return "checkmark.circle.fill" }
+        if e.groupID == nil, let to = e.to, router?.store.contains(SealedFrame.frameID(inner: e.id, to: to)) == true { return "point.3.connected.trianglepath.dotted" }
+        return "clock"
+    }
+    private func preview(_ e: Envelope?, group: Bool) -> String {
+        guard let e else { return group ? "Group created" : "Tap to start chatting" }
+        let body = e.media.map { $0.kind == "audio" ? "🎵 Audio" : "🎬 Video" } ?? (e.text ?? "")
+        let who = e.sender == identity ? "You: " : group ? senderName(e.sender) + ": " : ""
+        return who + body
+    }
     private func refresh() {
         guard let engine else { return }
         groups = groupBook?.groups ?? []
@@ -376,6 +426,17 @@ final class MeshModel: ObservableObject {
         for e in active where e.kind == "ack" && e.to == identity { if let id = e.ackFor { grouped[id, default: []].insert(e.sender) } }
         receipts = grouped
         relayCarried = router?.carriedCount() ?? 0
+        let visible = active.filter { $0.kind == "text" || $0.kind == "media" }
+        var summaries: [ChatSummary] = []
+        for contact in contacts {
+            let last = visible.last { $0.groupID == nil && (($0.sender == identity && $0.to == contact.id) || ($0.sender == contact.id && $0.to == identity)) }
+            summaries.append(ChatSummary(id: "c:" + contact.id, title: contact.username, isGroup: false, preview: preview(last, group: false), lastTime: last?.created, online: isConnected(contact.id)))
+        }
+        for group in groups {
+            let last = visible.last { $0.groupID == group.id }
+            summaries.append(ChatSummary(id: "g:" + group.id, title: group.name, isGroup: true, preview: preview(last, group: true), lastTime: last?.created, online: false))
+        }
+        chatList = summaries.sorted { ($0.lastTime ?? 0, $1.title) > ($1.lastTime ?? 0, $0.title) }
         vault?.prune(keeping: Set(active.compactMap { $0.media?.id }))
     }
     func status(_ text: String) { log.append(text); if log.count > 50 { log.removeFirst(log.count - 50) } }

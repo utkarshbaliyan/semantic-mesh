@@ -2,8 +2,11 @@ import SwiftUI
 import AVKit
 import UniformTypeIdentifiers
 #if os(iOS)
+import UIKit
 import PhotosUI
 import CoreTransferable
+#else
+import AppKit
 #endif
 
 @main
@@ -12,134 +15,473 @@ struct SemanticMeshApp: App {
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup {
-            MeshView(mesh: mesh)
+            RootView(mesh: mesh)
                 .onChange(of: scenePhase) { _, phase in if phase == .background { mesh.stop() } }
                 #if os(macOS)
-                .frame(minWidth: 480, minHeight: 640)
+                .frame(minWidth: 760, minHeight: 560)
                 #endif
         }
     }
 }
 
-struct MeshView: View {
+enum Panel: String, Identifiable { case settings, nearby, chatInfo, groupEditor; var id: String { rawValue } }
+
+/// Chat list beside the open chat on Mac and iPad; collapses to a push navigation stack on iPhone.
+struct RootView: View {
     @ObservedObject var mesh: MeshModel
+    @State private var panel: Panel?
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    GroupBox("Your profile") {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                TextField("Username", text: $mesh.usernameDraft)
-                                    .autocorrectionDisabled()
-                                    #if os(iOS)
-                                    .textInputAutocapitalization(.never)
-                                    #endif
-                                    .onSubmit { mesh.saveUsername() }
-                                    .onChange(of: mesh.usernameDraft) { _, _ in mesh.usernameMessage = nil }
-                                Button("Save") { mesh.saveUsername() }.buttonStyle(.borderedProminent).disabled(mesh.recording || mesh.preparingMedia)
-                            }
-                            Text("3–24 characters: lowercase letters, numbers or _ — must start with a letter. Example: utkarsh_2").font(.caption).foregroundStyle(.secondary)
-                            if let message = mesh.usernameMessage { Text(message).font(.callout).foregroundStyle(mesh.usernameFailed ? .red : .green) }
-                            Text("@\(mesh.username) · \(mesh.identity.prefix(8))").font(.caption).textSelection(.enabled)
-                            Text("Safety code: \(mesh.safetyCode)").font(.caption.monospaced()).textSelection(.enabled)
-                            Text("Usernames are nearby aliases. Compare device IDs when names match.").font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                    Text("Keep Wi-Fi and Bluetooth enabled and both apps open. Nearby messaging works without internet.").font(.caption)
-                    HStack {
-                        Button(mesh.running ? "Stop network" : "Start network") { mesh.running ? mesh.stop() : mesh.start() }.buttonStyle(.borderedProminent)
-                        Text("\(mesh.connected.count) connected · carrying \(mesh.relayCarried) for others").font(.caption)
-                    }
-                    PeopleView(mesh: mesh)
-                    GroupsView(mesh: mesh)
-                    if mesh.selectedContact != nil || mesh.selectedGroup != nil { ConversationView(mesh: mesh) }
-                    if let latest = mesh.log.last { Text(latest).font(.caption).foregroundStyle(.secondary) }
-                    DisclosureGroup("Network log") {
-                        ForEach(Array(mesh.log.enumerated()), id: \.offset) { _, line in Text(line).font(.caption).frame(maxWidth: .infinity, alignment: .leading) }
-                    }
-                }.padding()
-            }.navigationTitle("Semantic Mesh")
-                .alert("Chat request", isPresented: Binding(get: { mesh.pendingInvitation != nil }, set: { if !$0 { mesh.answerInvitation(false) } })) {
-                    Button("Accept") { mesh.answerInvitation(true) }
-                    Button("Reject", role: .cancel) { mesh.answerInvitation(false) }
-                } message: { Text("\(mesh.pendingInvitation?.label ?? "Nearby user") wants to chat. Confirm their device ID in person.") }
-                .sheet(isPresented: $mesh.showGroupEditor) { GroupEditor(mesh: mesh) }
-                .sheet(isPresented: $mesh.showPlayer, onDismiss: { mesh.endPlayback() }) {
-                    VStack {
-                        MediaPlayerView(player: mesh.player).frame(minHeight: 240)
-                        Button("Close") { mesh.endPlayback() }.padding()
-                    }.frame(minWidth: 320).padding()
-                }
-                .fileImporter(isPresented: $mesh.showImporter, allowedContentTypes: mesh.importKind == "audio" ? [.audio] : [.movie]) { result in
-                    switch result {
-                    case .success(let url): mesh.importFile(url, kind: mesh.importKind)
-                    case .failure(let error): mesh.status(error.localizedDescription)
-                    }
-                }
+        NavigationSplitView {
+            ChatListView(mesh: mesh, panel: $panel)
+                .navigationSplitViewColumnWidth(min: 280, ideal: 330)
+        } detail: {
+            if mesh.selectedChatKey != nil { ConversationView(mesh: mesh, panel: $panel) }
+            else {
+                ContentUnavailableView("Select a chat", systemImage: "bubble.left.and.bubble.right",
+                                       description: Text("Find people nearby, then chat without internet."))
+            }
+        }
+        .alert("Chat request", isPresented: Binding(get: { mesh.pendingInvitation != nil }, set: { if !$0 { mesh.answerInvitation(false) } })) {
+            Button("Accept") { mesh.answerInvitation(true) }
+            Button("Reject", role: .cancel) { mesh.answerInvitation(false) }
+        } message: { Text("\(mesh.pendingInvitation?.label ?? "Nearby user") wants to chat. Confirm their device ID in person.") }
+        .sheet(item: $panel, onDismiss: { if mesh.showGroupEditor && panel == nil { mesh.showGroupEditor = false } }) { item in
+            switch item {
+            case .settings: SettingsView(mesh: mesh, panel: $panel)
+            case .nearby: NearbyView(mesh: mesh, panel: $panel)
+            case .chatInfo: ChatInfoView(mesh: mesh, panel: $panel)
+            case .groupEditor: GroupEditor(mesh: mesh)
+            }
+        }
+        .onChange(of: mesh.showGroupEditor) { _, open in
+            if open { panel = .groupEditor } else if panel == .groupEditor { panel = nil }
+        }
+        .sheet(isPresented: $mesh.showPlayer, onDismiss: { mesh.endPlayback() }) {
+            VStack {
+                MediaPlayerView(player: mesh.player).frame(minHeight: 240)
+                Button("Close") { mesh.endPlayback() }.padding()
+            }.frame(minWidth: 320).padding()
+        }
+        .fileImporter(isPresented: $mesh.showImporter, allowedContentTypes: mesh.importKind == "audio" ? [.audio] : [.movie]) { result in
+            switch result {
+            case .success(let url): mesh.importFile(url, kind: mesh.importKind)
+            case .failure(let error): mesh.status(error.localizedDescription)
+            }
         }
     }
 }
 
-struct PeopleView: View {
+struct Avatar: View {
+    let name: String
+    var group = false
+    var size: CGFloat = 44
+    private var color: Color {
+        let palette: [Color] = [.blue, .green, .orange, .pink, .purple, .teal, .indigo, .red]
+        return palette[Int(name.unicodeScalars.reduce(UInt32(0)) { $0 &* 31 &+ $1.value } % UInt32(palette.count))]
+    }
+    var body: some View {
+        ZStack {
+            Circle().fill(color.gradient)
+            if group { Image(systemName: "person.3.fill").font(.system(size: size * 0.32)).foregroundStyle(.white) }
+            else { Text(String(name.prefix(1)).uppercased()).font(.system(size: size * 0.45, weight: .semibold)).foregroundStyle(.white) }
+        }.frame(width: size, height: size).accessibilityHidden(true)
+    }
+}
+
+struct ChatListView: View {
+    @ObservedObject var mesh: MeshModel
+    @Binding var panel: Panel?
+    var body: some View {
+        List(selection: Binding(get: { mesh.selectedChatKey }, set: { mesh.selectedChatKey = $0 })) {
+            Section { NetworkBanner(mesh: mesh) }
+            Section("Chats") {
+                if mesh.chatList.isEmpty {
+                    Button { panel = .nearby } label: { Label("Find people nearby to start chatting", systemImage: "person.badge.plus") }
+                }
+                ForEach(mesh.filteredChats) { chat in ChatRow(chat: chat).tag(chat.id) }
+            }
+        }
+        .searchable(text: $mesh.chatSearch, prompt: "Search chats")
+        .navigationTitle("Chats")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button { panel = .nearby } label: { Label("Find people", systemImage: "person.badge.plus") }
+                Button { mesh.editGroup() } label: { Label("New group", systemImage: "person.3") }
+                    .disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
+                Button { panel = .settings } label: { Label("Settings", systemImage: "gearshape") }
+            }
+        }
+    }
+}
+
+struct NetworkBanner: View {
     @ObservedObject var mesh: MeshModel
     var body: some View {
-        VStack(spacing: 18) {
-            GroupBox("Find people nearby") {
-                VStack(alignment: .leading, spacing: 10) {
-                    TextField("Search username or device ID", text: $mesh.search).autocorrectionDisabled()
-                    if mesh.filteredNearby.isEmpty { Text(mesh.running ? "No matching nearby users. Open version 0.5 on the other device." : "Start the network to discover people.").font(.caption).foregroundStyle(.secondary) }
+        HStack(spacing: 10) {
+            Circle().fill(mesh.running ? Color.green : Color.secondary).frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mesh.running ? "Mesh on" : "Mesh off").font(.subheadline.bold())
+                Text(mesh.running ? "\(mesh.connected.count) connected · carrying \(mesh.relayCarried) for others" : "Turn on to send and receive without internet")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(mesh.running ? "Stop" : "Start") { mesh.running ? mesh.stop() : mesh.start() }
+                .buttonStyle(.borderedProminent).tint(mesh.running ? .red : .green)
+        }.padding(.vertical, 4)
+    }
+}
+
+struct ChatRow: View {
+    let chat: ChatSummary
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack(alignment: .bottomTrailing) {
+                Avatar(name: chat.title, group: chat.isGroup)
+                if chat.online { Circle().fill(.green).frame(width: 12, height: 12).overlay(Circle().stroke(.background, lineWidth: 2)) }
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text(chat.isGroup ? chat.title : "@" + chat.title).font(.headline).lineLimit(1)
+                    Spacer()
+                    if let time = chat.lastTime { Text(Date(timeIntervalSince1970: Double(time) / 1000), style: .time).font(.caption).foregroundStyle(.secondary) }
+                }
+                Text(chat.preview).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }.padding(.vertical, 4)
+    }
+}
+
+struct ConversationView: View {
+    @ObservedObject var mesh: MeshModel
+    @Binding var panel: Panel?
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        if let notice = mesh.chatNotice {
+                            Text(notice).font(.caption).multilineTextAlignment(.center).padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(.thinMaterial, in: Capsule()).padding(.vertical, 8)
+                        }
+                        ForEach(mesh.messages, id: \.id) { e in Bubble(mesh: mesh, envelope: e).id(e.id) }
+                    }.padding(.horizontal, 10).padding(.vertical, 8)
+                }
+                .onChange(of: mesh.messages.last?.id) { _, id in if let id { withAnimation { proxy.scrollTo(id, anchor: .bottom) } } }
+                .onAppear { if let id = mesh.messages.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
+            }
+            Divider()
+            Composer(mesh: mesh)
+        }
+        .navigationTitle(mesh.chatTitle)
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { panel = .chatInfo } label: { Label(mesh.selectedGroup == nil ? "Contact info" : "Group info", systemImage: "info.circle") }
+            }
+        }
+    }
+}
+
+struct Bubble: View {
+    @ObservedObject var mesh: MeshModel
+    let envelope: Envelope
+    private var mine: Bool { envelope.sender == mesh.identity }
+    var body: some View {
+        HStack {
+            if mine { Spacer(minLength: 48) }
+            VStack(alignment: .leading, spacing: 4) {
+                if !mine, mesh.selectedGroup != nil { Text(mesh.senderName(envelope.sender)).font(.caption.bold()).foregroundStyle(Color.accentColor) }
+                content
+                HStack(spacing: 4) {
+                    Spacer(minLength: 0)
+                    Text(Date(timeIntervalSince1970: Double(envelope.created) / 1000), style: .time)
+                    if mine { Image(systemName: mesh.deliveryIcon(envelope)) }
+                }.font(.caption2).foregroundStyle(mine ? Color.white.opacity(0.85) : Color.secondary)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .background(mine ? Color.accentColor : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 16))
+            .foregroundStyle(mine ? Color.white : Color.primary)
+            .frame(maxWidth: 520, alignment: mine ? .trailing : .leading)
+            .help(mine ? mesh.deliveryStatus(envelope) : "")
+            .contextMenu {
+                if let text = envelope.text { Button { copy(text) } label: { Label("Copy", systemImage: "doc.on.doc") } }
+                if mine { Text(mesh.deliveryStatus(envelope)) }
+            }
+            if !mine { Spacer(minLength: 48) }
+        }
+    }
+    @ViewBuilder private var content: some View {
+        if let media = envelope.media {
+            if mesh.mediaAvailable(envelope) {
+                Button { mesh.play(envelope) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: media.kind == "audio" ? "play.circle.fill" : "play.rectangle.fill").font(.largeTitle)
+                        VStack(alignment: .leading) {
+                            Text(media.kind == "audio" ? "Audio" : "Video").bold()
+                            Text(ByteCountFormatter.string(fromByteCount: media.bytes, countStyle: .file)).font(.caption)
+                        }
+                    }
+                }.buttonStyle(.plain)
+            } else { Label("Receiving \(media.kind)…", systemImage: "arrow.down.circle") }
+        } else { Text(envelope.text ?? "").textSelection(.enabled) }
+    }
+    private func copy(_ text: String) {
+        #if os(iOS)
+        UIPasteboard.general.string = text
+        #else
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+        #endif
+    }
+}
+
+/// Every chat gets the same composer: attachments, emoji, text, and voice recording.
+struct Composer: View {
+    @ObservedObject var mesh: MeshModel
+    @State private var recordStart = Date()
+    @State private var showPhotos = false
+    private let emojis = ["😀", "😂", "😍", "🥰", "😎", "🤔", "😢", "😡", "👍", "👎", "🙏", "👏", "🎉", "❤️", "🔥", "✅"]
+    private var busy: Bool { !mesh.canCompose || mesh.requestingMicrophone || mesh.preparingMedia }
+    private var trimmed: String { mesh.draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var body: some View {
+        VStack(spacing: 6) {
+            if mesh.preparingMedia { ProgressView("Preparing video…").font(.caption) }
+            if mesh.recording {
+                HStack(spacing: 12) {
+                    Image(systemName: "record.circle").foregroundStyle(.red).symbolEffect(.pulse)
+                    TimelineView(.periodic(from: recordStart, by: 1)) { context in
+                        let seconds = max(0, Int(context.date.timeIntervalSince(recordStart)))
+                        Text(String(format: "%d:%02d / 2:00", seconds / 60, seconds % 60)).monospacedDigit()
+                    }
+                    Spacer()
+                    Button(role: .destructive) { mesh.cancelRecording() } label: { Image(systemName: "trash").font(.title3) }
+                        .accessibilityLabel("Cancel recording")
+                    Button { mesh.toggleRecording() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                        .accessibilityLabel("Send recording")
+                }
+            } else {
+                HStack(alignment: .bottom, spacing: 8) {
+                    Menu {
+                        Button { mesh.chooseMedia("audio") } label: { Label("Audio file", systemImage: "music.note") }
+                        Button { mesh.chooseMedia("video") } label: { Label("Video file", systemImage: "film") }
+                        #if os(iOS)
+                        Button { showPhotos = true } label: { Label("Video from Photos", systemImage: "photo.on.rectangle") }
+                        #endif
+                    } label: { Image(systemName: "plus.circle.fill").font(.title2) }
+                        .disabled(busy).accessibilityLabel("Attach")
+                    Menu {
+                        ForEach(emojis, id: \.self) { emoji in Button(emoji) { if mesh.draft.utf16.count + emoji.utf16.count <= 2000 { mesh.draft += emoji } } }
+                    } label: { Image(systemName: "face.smiling").font(.title2) }
+                        .disabled(busy).accessibilityLabel("Emoji")
+                    TextField(mesh.canCompose ? "Message" : "Can't send right now", text: $mesh.draft, axis: .vertical)
+                        .lineLimit(1...5).textFieldStyle(.plain)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 18))
+                        .disabled(!mesh.canCompose)
+                    if trimmed.isEmpty {
+                        Button { mesh.toggleRecording() } label: { Image(systemName: mesh.requestingMicrophone ? "hourglass.circle" : "mic.circle.fill").font(.title) }
+                            .disabled(busy).accessibilityLabel("Record voice message")
+                    } else {
+                        Button(action: send) { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                            .disabled(!mesh.canCompose || mesh.draft.utf16.count > 2000)
+                            .keyboardShortcut(.return, modifiers: .command).accessibilityLabel("Send")
+                    }
+                }
+                if mesh.draft.utf16.count > 1800 { Text("\(mesh.draft.utf16.count)/2000").font(.caption2).foregroundStyle(mesh.draft.utf16.count > 2000 ? Color.red : Color.secondary) }
+            }
+        }
+        .buttonStyle(.borderless)
+        .padding(10)
+        .background(.bar)
+        .onChange(of: mesh.recording) { _, on in if on { recordStart = Date() } }
+        #if os(iOS)
+        .photosPicker(isPresented: $showPhotos, selection: $mesh.pickedVideo, matching: .videos)
+        .onChange(of: mesh.pickedVideo) { _, item in
+            guard let item else { return }
+            mesh.preparingMedia = true
+            Task {
+                do {
+                    if let video = try await item.loadTransferable(type: PickedVideo.self) {
+                        mesh.importFile(video.url, kind: "video"); try? FileManager.default.removeItem(at: video.url)
+                    }
+                } catch { mesh.status(error.localizedDescription) }
+                mesh.preparingMedia = false; mesh.pickedVideo = nil
+            }
+        }
+        #endif
+    }
+    private func send() { if mesh.send(mesh.draft) { mesh.draft = "" } }
+}
+
+struct ChatInfoView: View {
+    @ObservedObject var mesh: MeshModel
+    @Binding var panel: Panel?
+    private var media: [Envelope] { mesh.messages.filter { $0.media != nil && mesh.mediaAvailable($0) } }
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let group = mesh.selectedGroup {
+                    Section {
+                        HStack(spacing: 14) {
+                            Avatar(name: group.name, group: true, size: 64)
+                            VStack(alignment: .leading) {
+                                Text(group.name).font(.title2.bold())
+                                Text(group.contains(mesh.identity) ? "\(group.members.count) members" : "You were removed").foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Section("Members") {
+                        ForEach(group.members) { member in
+                            HStack {
+                                Avatar(name: member.username, size: 32)
+                                Text(member.id == mesh.identity ? "You" : "@" + member.username)
+                                Spacer()
+                                if member.id == group.ownerID { Text("Owner").font(.caption).foregroundStyle(.secondary) }
+                                else if member.id != mesh.identity { Text(mesh.reachability(member.id)).font(.caption).foregroundStyle(.secondary) }
+                            }
+                        }
+                        if group.ownerID == mesh.identity {
+                            Button { mesh.editGroup(group) } label: { Label("Add or remove members", systemImage: "person.badge.plus") }
+                        }
+                    }
+                } else if let contact = mesh.selectedContact {
+                    Section {
+                        HStack(spacing: 14) {
+                            Avatar(name: contact.username, size: 64)
+                            VStack(alignment: .leading) {
+                                Text("@" + contact.username).font(.title2.bold())
+                                Text(mesh.reachability(contact.id)).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Section {
+                        LabeledContent("Device ID") { Text(contact.id).font(.caption.monospaced()).textSelection(.enabled) }
+                        LabeledContent("Safety code") { Text(mesh.safetyCode(for: contact.id) ?? "Not exchanged yet").monospaced() }
+                    } header: { Text("Security") } footer: { Text("Compare this code with the one in their Settings, in person. If they match, nobody is impersonating them.") }
+                }
+                Section("Media") {
+                    if media.isEmpty { Text("No audio or video in this chat.").foregroundStyle(.secondary) }
+                    ForEach(media, id: \.id) { e in
+                        Button {
+                            panel = nil
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { mesh.play(e) }
+                        } label: {
+                            HStack {
+                                Label(e.media?.kind == "audio" ? "Audio" : "Video", systemImage: e.media?.kind == "audio" ? "music.note" : "film")
+                                Spacer()
+                                Text(mesh.senderName(e.sender)).font(.caption).foregroundStyle(.secondary)
+                                Text(Date(timeIntervalSince1970: Double(e.created) / 1000), style: .time).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle(mesh.selectedGroup == nil ? "Contact info" : "Group info")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { panel = nil } } }
+        }.frame(minWidth: 380, minHeight: 460)
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var mesh: MeshModel
+    @Binding var panel: Panel?
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Account") {
+                    HStack(spacing: 14) {
+                        Avatar(name: mesh.username, size: 56)
+                        VStack(alignment: .leading) {
+                            Text("@" + mesh.username).font(.title3.bold())
+                            Text("Device \(String(mesh.identity.prefix(8)))").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    HStack {
+                        TextField("Username", text: $mesh.usernameDraft)
+                            .autocorrectionDisabled()
+                            #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+                            .onSubmit { mesh.saveUsername() }
+                            .onChange(of: mesh.usernameDraft) { _, _ in mesh.usernameMessage = nil }
+                        Button("Save") { mesh.saveUsername() }.disabled(mesh.recording || mesh.preparingMedia || mesh.usernameDraft == mesh.username)
+                    }
+                    if let message = mesh.usernameMessage { Text(message).font(.callout).foregroundStyle(mesh.usernameFailed ? .red : .green) }
+                    Text("3–24 lowercase letters, numbers or _, starting with a letter. Usernames are nearby aliases, not global accounts.").font(.caption).foregroundStyle(.secondary)
+                }
+                Section {
+                    LabeledContent("Device ID") { Text(mesh.identity).font(.caption.monospaced()).textSelection(.enabled) }
+                    LabeledContent("Safety code") { Text(mesh.safetyCode).monospaced().textSelection(.enabled) }
+                } header: { Text("Security") } footer: { Text("Contacts compare this code in person to confirm it's really you.") }
+                Section {
+                    Toggle("Mesh network", isOn: Binding(get: { mesh.running }, set: { $0 ? mesh.start() : mesh.stop() }))
+                    LabeledContent("Connected devices", value: "\(mesh.connected.count)")
+                    LabeledContent("Carrying for others", value: "\(mesh.relayCarried)")
+                } header: { Text("Network") } footer: { Text("Keep Wi-Fi and Bluetooth on and the app open. No internet needed. Text hops across devices; files need a direct connection.") }
+                Section("Limits") {
+                    Text("Messages and files expire after 1 hour. Text up to 2,000 characters. Audio/video up to 20 MB. Voice up to 2 minutes. Groups up to 16 people.").font(.caption)
+                }
+                Section("Network log") {
+                    if mesh.log.isEmpty { Text("No events yet.").foregroundStyle(.secondary) }
+                    ForEach(Array(mesh.log.enumerated().reversed()), id: \.offset) { _, line in Text(line).font(.caption).textSelection(.enabled) }
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle("Settings")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { panel = nil } } }
+        }.frame(minWidth: 420, minHeight: 520)
+    }
+}
+
+struct NearbyView: View {
+    @ObservedObject var mesh: MeshModel
+    @Binding var panel: Panel?
+    var body: some View {
+        NavigationStack {
+            List {
+                if !mesh.running {
+                    Section { Button { mesh.start() } label: { Label("Turn on the mesh to discover people", systemImage: "antenna.radiowaves.left.and.right") } }
+                }
+                Section {
+                    if mesh.running && mesh.filteredNearby.isEmpty { Text("Looking for people nearby running version 0.5…").foregroundStyle(.secondary) }
                     ForEach(mesh.filteredNearby) { peer in
                         HStack {
-                            Text(peer.name).font(.subheadline)
+                            Avatar(name: peer.profile.username, size: 36)
+                            VStack(alignment: .leading) {
+                                Text("@" + peer.profile.username)
+                                Text(String(peer.id.prefix(8))).font(.caption.monospaced()).foregroundStyle(.secondary)
+                            }
                             Spacer()
                             if mesh.isConnected(peer.id) { Text("Connected").font(.caption).foregroundStyle(.green) }
                             else {
-                                Button(mesh.pendingRequests.contains(peer.id) ? "Requested" : mesh.contacts.contains(where: { $0.id == peer.id }) ? "Reconnect" : "Request chat") { mesh.invite(peer) }.disabled(mesh.pendingRequests.contains(peer.id))
+                                Button(mesh.pendingRequests.contains(peer.id) ? "Requested" : mesh.contacts.contains(where: { $0.id == peer.id }) ? "Reconnect" : "Request chat") { mesh.invite(peer) }
+                                    .buttonStyle(.borderedProminent).disabled(mesh.pendingRequests.contains(peer.id))
                             }
                         }
                     }
-                    Text("Chat requests require the other person's approval.").font(.caption).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-            GroupBox("Contacts") {
-                VStack(alignment: .leading, spacing: 10) {
-                    if mesh.contacts.isEmpty { Text("Accepted chat requests appear here.").foregroundStyle(.secondary) }
+                } header: { Text("Nearby") } footer: { Text("They must accept your request. Compare device IDs in person if names match.") }
+                Section("Contacts") {
+                    if mesh.contacts.isEmpty { Text("Accepted requests appear here.").foregroundStyle(.secondary) }
                     ForEach(mesh.contacts) { contact in
-                        Button { mesh.selectContact(contact.id) } label: {
+                        Button {
+                            mesh.selectContact(contact.id); panel = nil
+                        } label: {
                             HStack {
-                                Image(systemName: mesh.selectedContactID == contact.id ? "checkmark.circle.fill" : "person.crop.circle")
-                                Text(contact.label)
+                                Avatar(name: contact.username, size: 32)
+                                Text("@" + contact.username)
                                 Spacer()
-                                Text(mesh.isConnected(contact.id) ? "Nearby" : mesh.reachableViaMesh(contact.id) ? "Via mesh" : "Offline").font(.caption)
+                                Text(mesh.reachability(contact.id)).font(.caption).foregroundStyle(.secondary)
                             }
-                        }.buttonStyle(.bordered).disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
-}
-
-struct GroupsView: View {
-    @ObservedObject var mesh: MeshModel
-    var body: some View {
-        GroupBox("Groups") {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(mesh.groups) { group in
-                    Button { mesh.selectGroup(group.id) } label: {
-                        HStack {
-                            Image(systemName: mesh.selectedGroupID == group.id ? "checkmark.circle.fill" : "person.3")
-                            Text(group.name)
-                            Spacer()
-                            Text(group.contains(mesh.identity) ? "\(group.members.count) members" : "Removed").font(.caption)
                         }
-                    }.buttonStyle(.bordered).disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
+                    }
                 }
-                Button("Create group") { mesh.editGroup() }.buttonStyle(.borderedProminent).disabled(mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
-                Text("The creator manages membership. Members must accept chat requests from one another to exchange messages directly.").font(.caption).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }
+            }
+            .searchable(text: $mesh.search, prompt: "Username or device ID")
+            .navigationTitle("Find people")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { panel = nil } } }
+        }.frame(minWidth: 400, minHeight: 480)
     }
 }
 
@@ -154,111 +496,27 @@ struct GroupEditor: View {
     }
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    TextField("Group name", text: $mesh.groupName)
-                    Text("You are the owner. Choose up to 15 other members.").font(.caption)
-                    if candidates.isEmpty { Text("No contacts yet. Accept a chat request from someone nearby, then add them here.").font(.caption).foregroundStyle(.orange) }
+            Form {
+                Section { TextField("Group name", text: $mesh.groupName) } footer: { Text("You are the owner and manage members.") }
+                Section {
+                    if candidates.isEmpty { Text("No contacts yet. Accept a chat request from someone nearby first.").foregroundStyle(.orange) }
                     ForEach(candidates) { contact in
-                        Toggle(contact.label, isOn: Binding(get: { mesh.groupMembers.contains(contact.id) }, set: { included in
+                        Toggle(isOn: Binding(get: { mesh.groupMembers.contains(contact.id) }, set: { included in
                             if included { mesh.groupMembers.insert(contact.id) } else { mesh.groupMembers.remove(contact.id) }
-                        }))
-                    }
-                    Text("Uncheck a member to remove them. Changes reach disconnected devices when they reconnect with you.").font(.caption).foregroundStyle(.secondary)
-                    if let problem = mesh.groupError { Text(problem).font(.callout).foregroundStyle(.red) }
-                    HStack {
-                        Button("Cancel") { mesh.showGroupEditor = false }
-                        Spacer()
-                        Button("Save group") { mesh.saveGroup() }.buttonStyle(.borderedProminent)
-                    }
-                }.padding()
-            }.navigationTitle(mesh.editingGroupID == nil ? "Create group" : "Manage members")
-        }.frame(minWidth: 320, minHeight: 360)
-    }
-}
-
-struct ConversationView: View {
-    @ObservedObject var mesh: MeshModel
-    var body: some View {
-        GroupBox(mesh.chatTitle) {
-            VStack(alignment: .leading, spacing: 12) {
-                if let group = mesh.selectedGroup {
-                    Text(group.members.map { mesh.senderName($0.id) }.joined(separator: ", ")).font(.caption)
-                    if !group.contains(mesh.identity) { Text("You were removed from this group.").foregroundStyle(.secondary) }
-                    if group.ownerID == mesh.identity { Button("Add / remove members") { mesh.editGroup(group) }.disabled(mesh.recording || mesh.preparingMedia) }
-                } else if let contact = mesh.selectedContact, !mesh.isConnected(contact.id) {
-                    Text("Offline. Reconnect nearby within one hour to deliver queued messages.").font(.caption).foregroundStyle(.secondary)
-                }
-                if mesh.messages.isEmpty { Text("No live messages in this chat.").foregroundStyle(.secondary) }
-                ForEach(mesh.messages, id: \.id) { e in MessageView(mesh: mesh, envelope: e); Divider() }
-                TextField("Message", text: $mesh.draft, axis: .vertical).lineLimit(2...5)
-                HStack {
-                    ForEach(["😀", "😂", "❤️", "👍", "🎉", "🙏"], id: \.self) { emoji in
-                        Button(emoji) { mesh.draft += emoji }.disabled(!mesh.canCompose || mesh.draft.utf16.count + emoji.utf16.count > 2000)
-                    }
-                }
-                HStack {
-                    Text("\(mesh.draft.utf16.count)/2000").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Send") { if mesh.send(mesh.draft) { mesh.draft = "" } }
-                        .disabled(!mesh.canCompose || mesh.recording || mesh.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || mesh.draft.utf16.count > 2000)
-                }
-                MediaComposer(mesh: mesh)
-                Text("Audio/video: up to 20 MB. Voice: up to 2 minutes. Messages and attachments expire after one hour. Delivery confirms storage, not reading.").font(.caption).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-struct MessageView: View {
-    @ObservedObject var mesh: MeshModel
-    let envelope: Envelope
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(mesh.senderName(envelope.sender)).font(.caption).foregroundStyle(.secondary)
-            if let media = envelope.media {
-                if mesh.mediaAvailable(envelope) {
-                    Button { mesh.play(envelope) } label: { Label("Play \(media.kind) · \(ByteCountFormatter.string(fromByteCount: media.bytes, countStyle: .file))", systemImage: media.kind == "audio" ? "play.circle" : "video") }
-                } else { Text("Waiting for \(media.kind) attachment…").foregroundStyle(.secondary) }
-            } else { Text(envelope.text ?? "").textSelection(.enabled) }
-            HStack {
-                Text(Date(timeIntervalSince1970: Double(envelope.created) / 1000), style: .time)
-                if envelope.sender == mesh.identity { Text(mesh.deliveryStatus(envelope)) }
-            }.font(.caption).foregroundStyle(.secondary)
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
-    }
-}
-
-struct MediaComposer: View {
-    @ObservedObject var mesh: MeshModel
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Button("Audio file") { mesh.chooseMedia("audio") }
-                Button("Video file") { mesh.chooseMedia("video") }
-                #if os(iOS)
-                PhotosPicker(selection: $mesh.pickedVideo, matching: .videos) { Text("Photos video") }
-                    .onChange(of: mesh.pickedVideo) { _, item in
-                        guard let item else { return }
-                        mesh.preparingMedia = true
-                        Task {
-                            do {
-                                if let video = try await item.loadTransferable(type: PickedVideo.self) {
-                                    mesh.importFile(video.url, kind: "video"); try? FileManager.default.removeItem(at: video.url)
-                                }
-                            } catch { mesh.status(error.localizedDescription) }
-                            mesh.preparingMedia = false; mesh.pickedVideo = nil
+                        })) {
+                            HStack { Avatar(name: contact.username, size: 28); Text("@" + contact.username) }
                         }
                     }
-                #endif
-            }.disabled(!mesh.canCompose || mesh.recording || mesh.requestingMicrophone || mesh.preparingMedia)
-            if mesh.preparingMedia { ProgressView("Preparing video…") }
-            HStack {
-                Button(mesh.recording ? "Send recording" : mesh.requestingMicrophone ? "Waiting for microphone…" : "Record voice") { mesh.toggleRecording() }
-                    .disabled(!mesh.canCompose || mesh.requestingMicrophone || mesh.preparingMedia)
-                if mesh.recording { Button("Cancel recording") { mesh.cancelRecording() } }
+                } header: { Text("Members (\(mesh.groupMembers.count)/15)") } footer: { Text("Unchecking removes a member. Changes reach devices when they connect to you or through the mesh.") }
+                if let problem = mesh.groupError { Section { Text(problem).foregroundStyle(.red) } }
             }
-        }
+            .formStyle(.grouped)
+            .navigationTitle(mesh.editingGroupID == nil ? "New group" : "Edit members")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { mesh.showGroupEditor = false } }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { mesh.saveGroup() } }
+            }
+        }.frame(minWidth: 380, minHeight: 440)
     }
 }
 
