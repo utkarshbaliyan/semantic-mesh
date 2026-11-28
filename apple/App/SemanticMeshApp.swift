@@ -1,12 +1,113 @@
 import SwiftUI
 import AVKit
 import UniformTypeIdentifiers
+import CoreImage.CIFilterBuiltins
 #if os(iOS)
 import UIKit
 import PhotosUI
 import CoreTransferable
 #else
 import AppKit
+#endif
+
+/// Renders a string (an `sm://add` contact link) as a QR code image for either platform.
+func meshQRImage(from string: String) -> Image? {
+    let filter = CIFilter.qrCodeGenerator()
+    filter.message = Data(string.utf8)
+    filter.correctionLevel = "M"
+    guard let output = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 10, y: 10)) else { return nil }
+    let context = CIContext()
+    guard let cg = context.createCGImage(output, from: output.extent) else { return nil }
+    #if os(iOS)
+    return Image(uiImage: UIImage(cgImage: cg))
+    #else
+    return Image(nsImage: NSImage(cgImage: cg, size: NSSize(width: output.extent.width, height: output.extent.height)))
+    #endif
+}
+
+struct MyQRView: View {
+    @ObservedObject var mesh: MeshModel
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                if let link = mesh.myCardLink, let image = meshQRImage(from: link) {
+                    image.interpolation(.none).resizable().scaledToFit().frame(maxWidth: 280)
+                        .padding().background(.white).clipShape(RoundedRectangle(cornerRadius: 12))
+                    Text(mesh.myHandle).font(.headline)
+                    Text("Have someone scan this in Semantic Mesh, or send them the link below, to add you as a verified contact.")
+                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Text(link).font(.caption2.monospaced()).textSelection(.enabled).lineLimit(4).padding(.horizontal)
+                } else {
+                    Text("Your contact code is unavailable because secure storage could not be opened.").foregroundStyle(.secondary)
+                }
+            }.padding()
+        }.navigationTitle("My QR code")
+    }
+}
+
+#if os(iOS)
+struct ScanQRView: View {
+    @ObservedObject var mesh: MeshModel
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        QRScanner { code in if mesh.addFromCard(code) { dismiss() } }
+            .ignoresSafeArea()
+            .overlay(alignment: .bottom) {
+                Text(mesh.addContactMessage ?? "Point the camera at a Semantic Mesh QR code.")
+                    .font(.callout).padding().frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial)
+            }
+            .navigationTitle("Scan a code")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// A camera preview that reports the first `sm://` QR payload it sees. No SwiftUI macros are used.
+struct QRScanner: UIViewControllerRepresentable {
+    let onFound: (String) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(onFound: onFound) }
+    func makeUIViewController(context: Context) -> ScannerController {
+        let controller = ScannerController(); controller.coordinator = context.coordinator; return controller
+    }
+    func updateUIViewController(_ controller: ScannerController, context: Context) {}
+    final class Coordinator: NSObject, AVCaptureMetadataOutputObjectsDelegate {
+        let onFound: (String) -> Void
+        private var handled = false
+        init(onFound: @escaping (String) -> Void) { self.onFound = onFound }
+        func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
+            guard !handled, let object = objects.first as? AVMetadataMachineReadableCodeObject,
+                  let value = object.stringValue, value.hasPrefix("sm://") else { return }
+            handled = true; onFound(value)
+        }
+    }
+}
+
+final class ScannerController: UIViewController {
+    var coordinator: QRScanner.Coordinator?
+    private let session = AVCaptureSession()
+    private var preview: AVCaptureVideoPreviewLayer?
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else { return }
+        session.addInput(input)
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else { return }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(coordinator, queue: .main)
+        output.metadataObjectTypes = [.qr]
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill; layer.frame = view.bounds
+        view.layer.addSublayer(layer); preview = layer
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.session.startRunning() }
+    }
+    override func viewDidLayoutSubviews() { super.viewDidLayoutSubviews(); preview?.frame = view.bounds }
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in if self?.session.isRunning == true { self?.session.stopRunning() } }
+    }
+}
 #endif
 
 @main
@@ -142,8 +243,10 @@ struct ChatRow: View {
                 if chat.online { Circle().fill(.green).frame(width: 12, height: 12).overlay(Circle().stroke(.background, lineWidth: 2)) }
             }
             VStack(alignment: .leading, spacing: 3) {
-                HStack {
+                HStack(spacing: 4) {
                     Text(chat.isGroup ? chat.title : "@" + chat.title).font(.headline).lineLimit(1)
+                    if let tag = chat.tag { Text("#" + tag).font(.caption.monospaced()).foregroundStyle(.secondary) }
+                    if chat.verified { Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.blue) }
                     Spacer()
                     if let time = chat.lastTime { Text(Date(timeIntervalSince1970: Double(time) / 1000), style: .time).font(.caption).foregroundStyle(.secondary) }
                 }
@@ -333,8 +436,9 @@ struct ChatInfoView: View {
                     Section("Members") {
                         ForEach(group.members) { member in
                             HStack {
-                                Avatar(name: member.username, size: 32)
-                                Text(member.id == mesh.identity ? "You" : "@" + member.username)
+                                Avatar(name: mesh.nickname(member.id) ?? member.username, size: 32)
+                                Text(member.id == mesh.identity ? "You" : "@" + (mesh.nickname(member.id) ?? member.username) + (mesh.contactTag(member.id).map { "#" + $0 } ?? ""))
+                                if member.id != mesh.identity, mesh.isVerified(member.id) { Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.blue) }
                                 Spacer()
                                 if member.id == group.ownerID { Text("Owner").font(.caption).foregroundStyle(.secondary) }
                                 else if member.id != mesh.identity { Text(mesh.reachability(member.id)).font(.caption).foregroundStyle(.secondary) }
@@ -347,17 +451,35 @@ struct ChatInfoView: View {
                 } else if let contact = mesh.selectedContact {
                     Section {
                         HStack(spacing: 14) {
-                            Avatar(name: contact.username, size: 64)
-                            VStack(alignment: .leading) {
-                                Text("@" + contact.username).font(.title2.bold())
+                            Avatar(name: mesh.contactName(contact.id), size: 64)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 5) {
+                                    Text(mesh.contactHandle(contact.id)).font(.title2.bold())
+                                    if mesh.isVerified(contact.id) { Image(systemName: "checkmark.seal.fill").foregroundStyle(.blue) }
+                                }
+                                if mesh.nickname(contact.id) != nil { Text("@" + contact.username).font(.caption).foregroundStyle(.secondary) }
                                 Text(mesh.reachability(contact.id)).foregroundStyle(.secondary)
                             }
                         }
                     }
                     Section {
+                        HStack {
+                            Text("Nickname")
+                            Spacer()
+                            TextField("Their name on this device", text: $mesh.nicknameDraft)
+                                .multilineTextAlignment(.trailing)
+                                #if os(iOS)
+                                .textInputAutocapitalization(.words)
+                                #endif
+                                .onAppear { mesh.beginNicknameEdit(contact.id) }
+                            Button("Save") { mesh.commitNickname() }.disabled(mesh.nicknameDraft == (mesh.nickname(contact.id) ?? ""))
+                        }
+                    } footer: { Text("A private label only you see. Leave blank to show their chosen username.") }
+                    Section {
                         LabeledContent("Device ID") { Text(contact.id).font(.caption.monospaced()).textSelection(.enabled) }
+                        LabeledContent("Tag") { Text("#" + (mesh.contactTag(contact.id) ?? "----")).monospaced() }
                         LabeledContent("Safety code") { Text(mesh.safetyCode(for: contact.id) ?? "Not exchanged yet").monospaced() }
-                    } header: { Text("Security") } footer: { Text("Compare this code with the one in their Settings, in person. If they match, nobody is impersonating them.") }
+                    } header: { Text("Security") } footer: { Text(mesh.isVerified(contact.id) ? "Added by scanning their code — identity verified." : "Compare this code with the one in their Settings, in person. If they match, nobody is impersonating them.") }
                 }
                 Section("Media") {
                     if media.isEmpty { Text("No audio or video in this chat.").foregroundStyle(.secondary) }
@@ -393,7 +515,7 @@ struct SettingsView: View {
                     HStack(spacing: 14) {
                         Avatar(name: mesh.username, size: 56)
                         VStack(alignment: .leading) {
-                            Text("@" + mesh.username).font(.title3.bold())
+                            Text(mesh.myHandle).font(.title3.bold())
                             Text("Device \(String(mesh.identity.prefix(8)))").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -414,6 +536,22 @@ struct SettingsView: View {
                     LabeledContent("Device ID") { Text(mesh.identity).font(.caption.monospaced()).textSelection(.enabled) }
                     LabeledContent("Safety code") { Text(mesh.safetyCode).monospaced().textSelection(.enabled) }
                 } header: { Text("Security") } footer: { Text("Contacts compare this code in person to confirm it's really you.") }
+                Section {
+                    NavigationLink { MyQRView(mesh: mesh) } label: { Label("My QR code", systemImage: "qrcode") }
+                    #if os(iOS)
+                    NavigationLink { ScanQRView(mesh: mesh) } label: { Label("Scan a code", systemImage: "qrcode.viewfinder") }
+                    #endif
+                    HStack {
+                        TextField("Paste an sm:// link", text: $mesh.pasteLink)
+                            .autocorrectionDisabled()
+                            #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+                        Button("Add") { if mesh.addFromCard(mesh.pasteLink) { mesh.pasteLink = "" } }
+                            .disabled(mesh.pasteLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if let message = mesh.addContactMessage { Text(message).font(.callout).foregroundStyle(.secondary) }
+                } header: { Text("Add people") } footer: { Text("Share your code, or scan/paste someone's, to add them as a verified contact without meeting on the mesh first.") }
                 Section {
                     Toggle("Mesh network", isOn: Binding(get: { mesh.running }, set: { mesh.setMesh($0) }))
                     LabeledContent("Connected devices", value: "\(mesh.connected.count)")
@@ -444,12 +582,12 @@ struct NearbyView: View {
                     Section { Button { mesh.setMesh(true) } label: { Label("Turn on the mesh to discover people", systemImage: "antenna.radiowaves.left.and.right") } }
                 }
                 Section {
-                    if mesh.running && mesh.filteredNearby.isEmpty { Text("Looking for people nearby running version 0.5…").foregroundStyle(.secondary) }
+                    if mesh.running && mesh.filteredNearby.isEmpty { Text("Looking for people nearby running version 0.6…").foregroundStyle(.secondary) }
                     ForEach(mesh.filteredNearby) { peer in
                         HStack {
                             Avatar(name: peer.profile.username, size: 36)
                             VStack(alignment: .leading) {
-                                Text("@" + peer.profile.username)
+                                Text("@" + peer.profile.username + "#" + peer.tag)
                                 Text(String(peer.id.prefix(8))).font(.caption.monospaced()).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -468,8 +606,9 @@ struct NearbyView: View {
                             mesh.selectContact(contact.id); panel = nil
                         } label: {
                             HStack {
-                                Avatar(name: contact.username, size: 32)
-                                Text("@" + contact.username)
+                                Avatar(name: mesh.contactName(contact.id), size: 32)
+                                Text(mesh.contactHandle(contact.id))
+                                if mesh.isVerified(contact.id) { Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.blue) }
                                 Spacer()
                                 Text(mesh.reachability(contact.id)).font(.caption).foregroundStyle(.secondary)
                             }

@@ -62,7 +62,13 @@ public enum ProfileError: Error, LocalizedError {
 }
 
 public final class ContactBook {
-    private struct State: Codable { var username: String; var contacts: [ChatProfile]; var keys: [String: PeerKeys]? = nil }
+    public static let maxNicknameLength = 40
+    private struct State: Codable {
+        var username: String; var contacts: [ChatProfile]; var keys: [String: PeerKeys]? = nil
+        /// Local-only display names and QR/link-verified identities, keyed by contact id.
+        var nicknames: [String: String]? = nil
+        var verified: [String]? = nil
+    }
     private let file: URL
     private var state: State
     public var username: String { state.username }
@@ -77,10 +83,34 @@ public final class ContactBook {
             state.contacts = try state.contacts.map { try $0.validated() }
             guard Set(state.contacts.map(\.id)).count == state.contacts.count else { throw ProfileError.invalidIdentity }
             for (id, keys) in state.keys ?? [:] { guard state.contacts.contains(where: { $0.id == id }) else { throw ProfileError.invalidIdentity }; try keys.validate() }
+            state.nicknames = (state.nicknames ?? [:]).filter { id, name in state.contacts.contains { $0.id == id } && !name.isEmpty }
+            state.verified = (state.verified ?? []).filter { id in state.contacts.contains { $0.id == id } }
         } else { state = State(username: try ChatProfile.normalize(defaultUsername), contacts: []); try save(state) }
     }
     public func profile(for id: String) -> ChatProfile? { state.contacts.first { $0.id == id } }
     public func keys(for id: String) -> PeerKeys? { state.keys?[id] }
+    public func nickname(for id: String) -> String? { state.nicknames?[id] }
+    public func isVerified(_ id: String) -> Bool { state.verified?.contains(id) == true }
+    /// A short tag derived from pinned keys, shown as username#TAG once keys are known.
+    public func tag(for id: String) -> String? { state.keys?[id]?.tag }
+    /// The name shown in the UI: a local nickname if set, otherwise the contact's chosen username.
+    public func displayName(for id: String) -> String? { state.nicknames?[id] ?? profile(for: id)?.username }
+    /// Sets or (with nil/empty) clears a local-only nickname for a contact.
+    public func setNickname(_ name: String?, for id: String) throws {
+        guard profile(for: id) != nil else { throw ProfileError.invalidIdentity }
+        let trimmed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.utf16.count <= Self.maxNicknameLength else { throw ProfileError.invalidUsername }
+        var next = state; var all = next.nicknames ?? [:]
+        if trimmed.isEmpty { all.removeValue(forKey: id) } else { all[id] = trimmed }
+        next.nicknames = all; try save(next); state = next
+    }
+    /// Adds a contact from a verified QR/link card: pins its keys and marks it verified.
+    public func addVerified(_ card: ContactCard) throws {
+        try accept(ChatProfile(id: card.id, username: card.username))
+        try pin(card.keys, for: card.id)
+        var next = state; var all = Set(next.verified ?? []); all.insert(card.id); next.verified = Array(all)
+        try save(next); state = next
+    }
     /// Trust on first use: the first keys received over an approved direct link are pinned; later changes are refused.
     @discardableResult public func pin(_ keys: PeerKeys, for id: String) throws -> Bool {
         try keys.validate()

@@ -2,6 +2,13 @@
 
 Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled and the apps open. Messaging works without internet. Text can now hop across other people's devices (multi-hop mesh), so range grows with the number of connected devices in between. It still cannot reach someone 100 km away without a chain of devices or a carrier who travels there within the hour. Android uses a different transport and cannot connect to the Apple app yet.
 
+## Version 0.6: identities, QR add, nicknames
+
+- **Every person shows as `@username#TAG`.** The tag is the first four hex characters of a SHA-256 of their signing key — short, stable and hard to spoof. It appears in the chat list, chat header, Nearby, Settings and group members, and is shown nearby **before** you connect (the signing key is advertised in discovery and verified against the key announced on connect; a mismatch is rejected).
+- **Add verified contacts with a QR code or link.** Settings → **My QR code** shows a code (and an `sm://add?...` link) encoding your identity and keys. On iPhone/iPad, **Scan a code** opens the camera; on Mac, paste the link. Contacts added this way are pinned as **verified** and carry a blue seal badge — no need to meet on the mesh first.
+- **Private nicknames.** In Chat info you can set a local display name for a contact; it overrides their chosen username everywhere in the UI and is only stored on your device.
+- Version 0.6 uses discovery protocol `chat=4` and does not see 0.5 or earlier devices. Update every device.
+
 ## Version 0.5: multi-hop mesh
 
 - **New messenger layout on Mac, iPhone and iPad.** A chat list (contacts and groups, newest first, with last-message previews and a nearby indicator) beside the open chat on Mac/iPad, push navigation on iPhone. Toolbar: **Find people**, **New group**, **Settings**.

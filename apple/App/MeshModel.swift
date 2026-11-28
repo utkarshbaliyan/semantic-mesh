@@ -9,6 +9,8 @@ import SwiftUI
 struct ChatSummary: Identifiable, Equatable {
     let id: String
     let title: String
+    let tag: String?
+    let verified: Bool
     let isGroup: Bool
     let preview: String
     let lastTime: Int64?
@@ -45,6 +47,12 @@ final class MeshModel: ObservableObject {
     @Published var usernameMessage: String?
     @Published var usernameFailed = false
     @Published var editingGroupID: String?
+    @Published var showMyQR = false
+    @Published var showScanner = false
+    @Published var pasteLink = ""
+    @Published var addContactMessage: String?
+    @Published var nicknameDraft = ""
+    @Published var editingNicknameID: String?
     @Published var showImporter = false
     @Published var importKind = "audio"
     @Published var recording = false
@@ -72,7 +80,12 @@ final class MeshModel: ObservableObject {
     var selectedContact: ChatProfile? { contacts.first { $0.id == selectedContactID } }
     var selectedGroup: MeshGroup? { groups.first { $0.id == selectedGroupID } }
     var canCompose: Bool { running && (selectedContact != nil || selectedGroup?.contains(identity) == true) }
-    var chatTitle: String { selectedGroup?.name ?? selectedContact.map { "@" + $0.username } ?? "Chats" }
+    var chatTitle: String { selectedGroup?.name ?? selectedContactID.map { contactHandle($0) } ?? "Chats" }
+    func beginNicknameEdit(_ id: String) { editingNicknameID = id; nicknameDraft = nickname(id) ?? "" }
+    func commitNickname() {
+        guard let id = editingNicknameID else { return }
+        setNickname(nicknameDraft, for: id); editingNicknameID = nil
+    }
     var filteredChats: [ChatSummary] {
         let term = chatSearch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return term.isEmpty ? chatList : chatList.filter { $0.title.lowercased().contains(term) }
@@ -185,14 +198,54 @@ final class MeshModel: ObservableObject {
     }
     private func pinKeys(_ note: KeyAnnouncement, from peer: String) {
         guard note.id == peer, let book = contactBook, book.profile(for: peer) != nil else { return }
+        // Reject a key that doesn't match the signing key the peer advertised nearby.
+        if let advertised = transport?.advertisedSign(for: peer), advertised != note.keys.sign {
+            status("Rejected keys from @\(book.displayName(for: peer) ?? "contact"): announced key did not match the advertised tag.")
+            return
+        }
         do {
             if try book.pin(note.keys, for: peer) {
-                status("Mesh keys saved for @\(book.profile(for: peer)?.username ?? "contact") (safety code \(note.keys.fingerprint)). They can now be reached through other devices.")
+                contacts = book.contacts
+                status("Mesh keys saved for @\(book.displayName(for: peer) ?? "contact")#\(note.keys.tag) (safety code \(note.keys.fingerprint)). They can now be reached through other devices.")
                 sync()
             }
         } catch { status(error.localizedDescription) }
     }
     var safetyCode: String { nodeKeys?.publicKeys.fingerprint ?? "unavailable" }
+    var myTag: String { nodeKeys?.publicKeys.tag ?? "----" }
+    var myHandle: String { "@\(username)#\(myTag)" }
+    /// This device's shareable contact card as an `sm://add` link / QR payload.
+    var myCardLink: String? {
+        guard let keys = nodeKeys?.publicKeys, let card = try? ContactCard(id: identity, username: username, keys: keys) else { return nil }
+        return card.link
+    }
+    func contactTag(_ id: String) -> String? { contactBook?.tag(for: id) }
+    func contactName(_ id: String) -> String { contactBook?.displayName(for: id) ?? String(id.prefix(8)) }
+    func isVerified(_ id: String) -> Bool { contactBook?.isVerified(id) == true }
+    /// Display handle for a contact: @name (nickname if set, else username) plus #TAG once keys are known.
+    func contactHandle(_ id: String) -> String {
+        let base = "@" + contactName(id)
+        return contactTag(id).map { base + "#" + $0 } ?? base
+    }
+    func nickname(_ id: String) -> String? { contactBook?.nickname(for: id) }
+    func setNickname(_ name: String?, for id: String) {
+        guard let book = contactBook else { return }
+        do { try book.setNickname(name, for: id); contacts = book.contacts; refresh() }
+        catch { status(error.localizedDescription) }
+    }
+    /// Adds a contact from a scanned QR code or pasted `sm://add` link, pinning its keys as verified.
+    @discardableResult func addFromCard(_ raw: String) -> Bool {
+        guard let book = contactBook else { addContactMessage = "Storage unavailable on this device."; return false }
+        do {
+            let card = try ContactCard.parse(raw)
+            guard card.id != identity else { addContactMessage = "That is your own contact card."; return false }
+            try book.addVerified(card)
+            contacts = book.contacts; refresh()
+            addContactMessage = "Added @\(book.displayName(for: card.id) ?? card.username)#\(card.tag) as a verified contact."
+            status("Verified contact @\(card.username)#\(card.tag) added from a code.")
+            return true
+        } catch { addContactMessage = "Couldn't add contact: \(error.localizedDescription)"; return false }
+    }
     func reachableViaMesh(_ id: String) -> Bool { contactBook?.keys(for: id) != nil }
     private func authorized(_ e: Envelope, from peer: String) -> Bool {
         guard e.expires > Envelope.now(), contactBook?.allows(e, localIdentity: identity, peerIdentity: peer) == true else { return false }
@@ -289,7 +342,7 @@ final class MeshModel: ObservableObject {
     }
     func start() {
         guard !running, engine != nil, let profile = try? ChatProfile(id: identity, username: username) else { return }
-        let transport = MultipeerTransport(profile: profile); self.transport = transport
+        let transport = MultipeerTransport(profile: profile, signKey: nodeKeys?.publicKeys.sign ?? ""); self.transport = transport
         transport.discovered = { [weak self] peer in guard let self else { return }; self.nearby.removeAll { $0.id == peer.id }; self.nearby.append(peer) }
         transport.lost = { [weak self] name in self?.nearby.removeAll { $0.peer.displayName == name } }
         transport.connected = { [weak self] profile in
@@ -407,7 +460,7 @@ final class MeshModel: ObservableObject {
     func mediaAvailable(_ e: Envelope) -> Bool { e.media.map { vault?.available($0) == true } ?? false }
     func play(_ e: Envelope) { guard let media = e.media, mediaAvailable(e), let url = try? vault?.url(for: media) else { return }; player = AVPlayer(url: url); showPlayer = true; player?.play() }
     func endPlayback() { player?.pause(); player = nil; showPlayer = false }
-    func senderName(_ id: String) -> String { id == identity ? "You" : "@" + (contacts.first { $0.id == id }?.username ?? selectedGroup?.members.first { $0.id == id }?.username ?? String(id.prefix(8))) }
+    func senderName(_ id: String) -> String { id == identity ? "You" : "@" + (contactBook?.displayName(for: id) ?? selectedGroup?.members.first { $0.id == id }?.username ?? String(id.prefix(8))) }
     func deliveryStatus(_ e: Envelope) -> String {
         let count = receipts[e.id]?.count ?? 0
         if let id = e.groupID {
@@ -451,11 +504,11 @@ final class MeshModel: ObservableObject {
         var summaries: [ChatSummary] = []
         for contact in contacts {
             let last = visible.last { $0.groupID == nil && (($0.sender == identity && $0.to == contact.id) || ($0.sender == contact.id && $0.to == identity)) }
-            summaries.append(ChatSummary(id: "c:" + contact.id, title: contact.username, isGroup: false, preview: preview(last, group: false), lastTime: last?.created, online: isConnected(contact.id)))
+            summaries.append(ChatSummary(id: "c:" + contact.id, title: contactName(contact.id), tag: contactTag(contact.id), verified: isVerified(contact.id), isGroup: false, preview: preview(last, group: false), lastTime: last?.created, online: isConnected(contact.id)))
         }
         for group in groups {
             let last = visible.last { $0.groupID == group.id }
-            summaries.append(ChatSummary(id: "g:" + group.id, title: group.name, isGroup: true, preview: preview(last, group: true), lastTime: last?.created, online: false))
+            summaries.append(ChatSummary(id: "g:" + group.id, title: group.name, tag: nil, verified: false, isGroup: true, preview: preview(last, group: true), lastTime: last?.created, online: false))
         }
         chatList = summaries.sorted { ($0.lastTime ?? 0, $1.title) > ($1.lastTime ?? 0, $0.title) }
         vault?.prune(keeping: Set(active.compactMap { $0.media?.id }))

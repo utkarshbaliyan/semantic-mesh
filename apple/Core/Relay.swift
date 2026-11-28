@@ -20,6 +20,42 @@ public struct PeerKeys: Codable, Equatable {
         let digest = SHA256.hash(data: Data((sign + "|" + box).utf8))
         return digest.prefix(6).map { String(format: "%02X", $0) }.joined().chunked(4).joined(separator: " ")
     }
+    /// Stable short tag shown as username#TAG: first 4 hex chars (uppercase) of SHA-256 of the raw signing key.
+    public var tag: String { Self.tag(forSignKey: sign) }
+    public static func tag(forSignKey sign: String) -> String {
+        guard let raw = Data(base64Encoded: sign), raw.count == 32 else { return "----" }
+        return SHA256.hash(data: raw).prefix(2).map { String(format: "%02X", $0) }.joined()
+    }
+}
+
+/// A contact's full identity, shared out-of-band via a QR code or `sm://add` link for verified adding.
+public struct ContactCard: Equatable {
+    public let id: String
+    public let username: String
+    public let keys: PeerKeys
+    public init(id: String, username: String, keys: PeerKeys) throws {
+        let profile = try ChatProfile(id: id, username: username)
+        self.id = profile.id; self.username = profile.username; self.keys = keys
+        try keys.validate()
+    }
+    public var tag: String { keys.tag }
+    private static func escape(_ s: String) -> String {
+        var allowed = CharacterSet.alphanumerics; allowed.insert(charactersIn: "-_.")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+    /// `sm://add?id=<uuid>&sign=<b64>&box=<b64>&name=<username>`
+    public var link: String {
+        "sm://add?id=\(id)&sign=\(Self.escape(keys.sign))&box=\(Self.escape(keys.box))&name=\(Self.escape(username))"
+    }
+    public static func parse(_ raw: String) throws -> ContactCard {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count <= 2048, let components = URLComponents(string: trimmed),
+              components.scheme == "sm", components.host == "add",
+              let items = components.queryItems else { throw RelayError.invalidFrame }
+        func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+        guard let id = value("id"), let sign = value("sign"), let box = value("box"), let name = value("name") else { throw RelayError.invalidFrame }
+        return try ContactCard(id: id, username: name, keys: PeerKeys(sign: sign, box: box))
+    }
 }
 private extension String {
     func chunked(_ size: Int) -> [String] {

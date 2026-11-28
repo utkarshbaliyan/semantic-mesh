@@ -409,6 +409,49 @@ final class CoreTests: TestBase {
         XCTAssertThrowsError(try router.accept(forged, from: UUID().uuidString, now: now))
         XCTAssertEqual(router.carriedCount(now: now), 0)
     }
+    func testIdentityTagIsStableFourHexFromSigningKey() throws {
+        let keys = NodeKeys().publicKeys
+        XCTAssertTrue(keys.tag.range(of: "^[0-9A-F]{4}$", options: .regularExpression) != nil)
+        XCTAssertEqual(keys.tag, PeerKeys.tag(forSignKey: keys.sign))
+        XCTAssertEqual(keys.tag, keys.tag) // deterministic
+        XCTAssertEqual(PeerKeys.tag(forSignKey: "not-base64!"), "----")
+    }
+    func testContactCardLinkRoundTripAndRejection() throws {
+        let id = UUID().uuidString.lowercased()
+        let keys = NodeKeys().publicKeys
+        let card = try ContactCard(id: id, username: "Alice_1", keys: keys)
+        let parsed = try ContactCard.parse(card.link)
+        XCTAssertEqual(parsed.id, id)
+        XCTAssertEqual(parsed.username, "alice_1")
+        XCTAssertEqual(parsed.keys, keys)
+        XCTAssertEqual(parsed.tag, keys.tag)
+        XCTAssertThrowsError(try ContactCard.parse("https://add?id=x"))
+        XCTAssertThrowsError(try ContactCard.parse("sm://add?id=\(id)&sign=\(keys.sign)")) // missing fields
+        XCTAssertThrowsError(try ContactCard.parse("sm://add?id=not-a-uuid&sign=\(keys.sign)&box=\(keys.box)&name=alice"))
+    }
+    func testNicknamesAndVerifiedPersistAndOverrideUsername() throws {
+        let directory = featureDirectory()
+        let file = directory.appendingPathComponent("contacts.json")
+        let id = UUID().uuidString.lowercased()
+        let keys = NodeKeys().publicKeys
+        do {
+            let book = try ContactBook(file: file, defaultUsername: "owner")
+            try book.addVerified(ContactCard(id: id, username: "bob", keys: keys))
+            XCTAssertTrue(book.isVerified(id))
+            XCTAssertEqual(book.tag(for: id), keys.tag)
+            XCTAssertEqual(book.displayName(for: id), "bob")
+            try book.setNickname("Roommate", for: id)
+            XCTAssertEqual(book.displayName(for: id), "Roommate")
+            XCTAssertThrowsError(try book.setNickname(String(repeating: "x", count: 41), for: id))
+            XCTAssertThrowsError(try book.setNickname("x", for: UUID().uuidString.lowercased()))
+        }
+        let restored = try ContactBook(file: file, defaultUsername: "unused")
+        XCTAssertEqual(restored.displayName(for: id), "Roommate")
+        XCTAssertTrue(restored.isVerified(id))
+        XCTAssertEqual(restored.tag(for: id), keys.tag)
+        try restored.setNickname("", for: id)
+        XCTAssertEqual(restored.displayName(for: id), "bob")
+    }
     func testInviteProofBindsIdentitiesAndExpires() throws {
         let a = NodeKeys(), b = NodeKeys()
         let from = UUID().uuidString.lowercased(), to = UUID().uuidString.lowercased()
@@ -471,7 +514,10 @@ final class CoreTests: TestBase {
             ("Carrier store-and-forward", checks.testCarrierDeliversAfterMovingToDestination),
             ("Forged relay frames dropped", checks.testRelayDropsForgedFramesFromKnownSenders),
             ("Contact keys pinned on first use", checks.testContactKeysPinnedOnFirstUse),
-            ("Friend invite proof", checks.testInviteProofBindsIdentitiesAndExpires)
+            ("Friend invite proof", checks.testInviteProofBindsIdentitiesAndExpires),
+            ("Identity tag from signing key", checks.testIdentityTagIsStableFourHexFromSigningKey),
+            ("Contact card link round-trip", checks.testContactCardLinkRoundTripAndRejection),
+            ("Nicknames and verified contacts", checks.testNicknamesAndVerifiedPersistAndOverrideUsername)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
         print("\(tests.count) core checks passed. Physical radio delivery is not covered.")

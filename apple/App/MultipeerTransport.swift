@@ -4,8 +4,11 @@ import MultipeerConnectivity
 struct NearbyPeer: Identifiable {
     let profile: ChatProfile
     let peer: MCPeerID
+    /// The signing public key the peer advertises, so we can show username#TAG before connecting.
+    let signKey: String?
     var id: String { profile.id }
     var name: String { profile.label }
+    var tag: String { signKey.map { PeerKeys.tag(forSignKey: $0) } ?? "----" }
 }
 
 /// Session invitations are explicit chat requests. Only approved peers may exchange direct frames.
@@ -20,6 +23,8 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         var time: Int64? = nil; var sig: String? = nil; var auto: Bool? = nil
     }
     private var localProfile: ChatProfile
+    /// This device's advertised signing public key (base64), so peers can show our tag before connecting.
+    private let localSign: String
     private let localPeer: MCPeerID
     private var sessions: [MCPeerID: MCSession] = [:]
     private var advertiser: MCNearbyServiceAdvertiser
@@ -45,24 +50,28 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     var invitation: (ChatProfile, @escaping (Bool) -> Void) -> Void = { _, reply in reply(false) }
     var status: (String) -> Void = { _ in }
 
-    init(profile: ChatProfile) {
+    init(profile: ChatProfile, signKey: String) {
         localProfile = profile
+        localSign = signKey
         let local = MCPeerID(displayName: "@\(profile.username)-\(profile.id.prefix(8))")
         localPeer = local
-        advertiser = Self.makeAdvertiser(local, profile)
+        advertiser = Self.makeAdvertiser(local, profile, signKey)
         browser = MCNearbyServiceBrowser(peer: local, serviceType: "semantic-mesh")
         super.init()
         advertiser.delegate = self; browser.delegate = self
     }
-    private static func makeAdvertiser(_ peer: MCPeerID, _ profile: ChatProfile) -> MCNearbyServiceAdvertiser {
-        MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: ["protocol": "1", "chat": "3", "id": profile.id, "username": profile.username], serviceType: "semantic-mesh")
+    private static func makeAdvertiser(_ peer: MCPeerID, _ profile: ChatProfile, _ sign: String) -> MCNearbyServiceAdvertiser {
+        // "chat" is the discovery protocol version; 4 adds the advertised signing key (0.6.0 wire format).
+        MCNearbyServiceAdvertiser(peer: peer, discoveryInfo: ["protocol": "1", "chat": "4", "id": profile.id, "username": profile.username, "sign": sign], serviceType: "semantic-mesh")
     }
+    /// The signing key a nearby peer advertised, used to reject a connect whose announced key doesn't match.
+    func advertisedSign(for id: String) -> String? { found[id]?.signKey }
     /// Re-advertises the new username without dropping existing chat sessions.
     func updateProfile(_ profile: ChatProfile) {
         guard profile.id == localProfile.id else { return }
         localProfile = profile
         advertiser.stopAdvertisingPeer(); advertiser.delegate = nil
-        advertiser = Self.makeAdvertiser(localPeer, profile); advertiser.delegate = self
+        advertiser = Self.makeAdvertiser(localPeer, profile, localSign); advertiser.delegate = self
         if active { advertiser.startAdvertisingPeer() }
     }
     private func makeSession(for peer: MCPeerID) -> MCSession {
@@ -144,10 +153,10 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     private func publishConnections() { connectionChanged(connectedPeers().compactMap { approved[$0] }) }
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "3",
+            guard let self, self.active, info?["protocol"] == "1", info?["chat"] == "4",
                   let id = info?["id"], let username = info?["username"],
                   let profile = try? ChatProfile(id: id, username: username), profile.id != self.localProfile.id else { return }
-            let peer = NearbyPeer(profile: profile, peer: peerID)
+            let peer = NearbyPeer(profile: profile, peer: peerID, signKey: info?["sign"])
             self.found[profile.id] = peer
             self.discovered(peer)
             self.autoConnect(firstSight: true)

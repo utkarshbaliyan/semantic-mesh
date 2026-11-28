@@ -222,7 +222,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/iOSInfo.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple;
 				PRODUCT_NAME = SemanticMesh;
 				SDKROOT = iphoneos;
@@ -246,7 +246,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/iOSInfo.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple;
 				PRODUCT_NAME = SemanticMesh;
 				SDKROOT = iphoneos;
@@ -271,7 +271,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/MacInfo.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple.mac;
 				PRODUCT_NAME = SemanticMeshMac;
 				SDKROOT = macosx;
@@ -295,7 +295,7 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = App/MacInfo.plist;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.2.0;
+				MARKETING_VERSION = 0.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.semanticmesh.apple.mac;
 				PRODUCT_NAME = SemanticMeshMac;
 				SDKROOT = macosx;
