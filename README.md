@@ -6,15 +6,20 @@ Offline device-to-device messaging prototype for Android (Bluetooth) and Mac/iPh
 
 The Apple app supports nearby usernames, chat requests, saved contacts, owner-managed groups, audio/video attachments, voice recording and emojis. For Mac↔iPhone testing, see [Apple setup and offline test instructions](apple/README.md). Apple uses a separate native transport with the same envelope. Android↔Apple interoperability is not implemented.
 
-## Implemented
+## Android prototype
 
-- Bluetooth Classic secure RFCOMM listener and outgoing connections; nearby discovery and paired-device list.
-- UUID device identity, versioned length-prefixed JSON frames, timestamps, one-hour expiry, eight-hop limit.
-- SQLite message persistence, ID deduplication, application-level receipt messages.
-- Flooding across connected peers and replay of live stored messages on connection and every 15 seconds.
-- Foreground UI for permissions, discovery, connections, text and receipt logs.
+The Android app now matches the Apple feature set over Bluetooth Classic: editable usernames with inline validation, chat requests, saved contacts, direct chats, owner-managed groups that any device can create, voice recording, audio/video attachments and delivery receipts. Like the Apple app, messages travel over direct approved links only; other people's messages are not relayed.
 
-This is an engineering prototype, not a verified emergency communication system. Multiple simultaneous links and actual delivery must be tested on physical phones. Receipt means another app stored a report; it does not mean a human read or verified it. Messages are broadcasts; receipts name their intended recipient.
+## Implemented (Android)
+
+- Secure RFCOMM listener and outgoing connections; nearby discovery and paired-device list.
+- Link handshake: each side announces its device ID and username; mutual contacts reconnect without a new request, everyone else needs an accepted chat request. One link per person.
+- Shared envelope with the Apple app (same JSON fields): text, receipts, group updates, media descriptors and media-ready requests; one-hour expiry, eight-hop limit, 16 KiB frames.
+- Owner-managed groups (up to 16 people), with membership updates that reach removed members too.
+- Attachments up to 20 MB (200 MB stored), sent in 8 KiB chunks and accepted only after size and SHA-256 match.
+- SQLite message persistence, ID deduplication and replay of live messages on connection and every 15 seconds.
+
+This is an engineering prototype, not a verified emergency communication system. Receipt means another app stored a report; it does not mean a human read or verified it.
 
 ## Build
 
@@ -28,19 +33,20 @@ Install `app/build/outputs/apk/debug/app-debug.apk` on Android 8+ phones. Keep t
 
 ## Verification
 
-Local SDK 35 build passed: `testDebugUnitTest assembleDebug lintDebug`; five protocol tests passed, lint had no errors. Physical-device transport, storage/replay and routing acceptance tests remain unperformed. GitHub Actions repeats checks and uploads the debug APK.
+Local SDK 35 build passed: `testDebugUnitTest assembleDebug lintDebug`; 16 unit tests passed (envelope rules plus simulated multi-device chats, groups created from every device, and verified media transfer), lint had no errors. The Bluetooth handshake, chunked file transfer, recording and playback have not yet been tested on physical Android phones. GitHub Actions repeats checks and uploads the debug APK.
 
 ## Two phones
 
-1. Disable mobile data and Wi-Fi on both phones; enable Bluetooth. Removing SIMs is an additional useful test.
-2. On both: Start, grant permissions, enable Bluetooth if requested, then press Start again.
-3. On B: Make discoverable. On A: Scan nearby, choose B, accept Android's pairing prompt on both.
-4. Send distinct messages both directions. Verify matching message-ID prefixes and receipts.
-5. Kill/reopen the app; verify stored messages remain. Restart listeners and reconnect manually.
+1. Disable mobile data and Wi-Fi on both phones; enable Bluetooth.
+2. On both: set a username (3–24 lowercase letters, numbers or `_`, starting with a letter) and tap Save; then tap Start network and grant permissions.
+3. On B: Make discoverable. On A: Scan nearby, tap Connect on B, and accept the pairing prompt on both.
+4. On A: Send chat request; on B: Accept. Both now list each other under Contacts.
+5. Send text, a recorded voice message and a short video both ways. Verify "Delivered to app" and that media plays.
+6. Kill/reopen the app; verify stored messages remain and that reconnecting does not ask for a new chat request.
 
 ## Three phones
 
-Start listeners on A/B/C. Make B discoverable. Connect A to B, then C to B. Never connect A directly to C. Send from A; C should log hops=2 and A should get receipts from B and C. Run the negative control: close B; a new A message must not reach C. Reopen B and reconnect to verify delayed delivery. See [device test plan](docs/device-testing.md).
+Connect and accept chat requests for every pair (A–B, B–C, A–C). On each phone in turn, Create group with the other two, then send a message: the other two should receive it and the sender should see "Delivered to 2 members". See [device test plan](docs/device-testing.md).
 
 ## Constraints
 
@@ -48,9 +54,9 @@ Start listeners on A/B/C. Make B discoverable. Connect A to B, then C to B. Neve
 - Retry uses full live-store replay, bounded to 5,000 envelopes and 16 KiB/frame. This is simple and inefficient; inventory synchronization and per-peer queues come next.
 - Blocking writes can delay the single protocol worker. Slow-peer isolation, backpressure and connection timeouts are needed before load testing.
 - Clocks must roughly agree; expiry uses wall time. No clock synchronization yet.
-- Secure Bluetooth pairing protects individual links. There is no end-to-end encryption, signed identity, trusted-group authorization or revocation. Relays can read reports and forge identities/receipts.
+- Secure Bluetooth pairing protects individual links. There is no end-to-end encryption or signed identity: device IDs and usernames are self-asserted, so compare device IDs in person before accepting a chat request.
 - Stable node UUID lives in private preferences; reinstalling resets it. History expires from forwarding after one hour.
-- Protocol and Bluetooth transport are separate source components; the initial orchestration resides in the Activity. Extract a lifecycle-independent engine before adding another transport or background operation.
+- Chat rules live in `MeshNode`, separate from the Bluetooth transport and the Activity, and are unit-tested without a device. Multi-hop relaying was removed to match the Apple app; messages need a direct link.
 
 ## Next gates
 
