@@ -409,6 +409,32 @@ final class CoreTests: TestBase {
         XCTAssertThrowsError(try router.accept(forged, from: UUID().uuidString, now: now))
         XCTAssertEqual(router.carriedCount(now: now), 0)
     }
+    func testRelayDigestSkipsFramesThePeerAlreadyHas() throws {
+        let a = UUID().uuidString.lowercased(), b = UUID().uuidString.lowercased()
+        let aKeys = NodeKeys(), bKeys = NodeKeys()
+        let router = try relayRouter(a)
+        var sentTo: [(String, String)] = []  // (frameID, peer)
+        router.send = { data, peer in if let f = try? SealedFrame.decode(data, now: self.now) { sentTo.append((f.id, peer)) } }
+        let e1 = try Envelope.message(sender: a, text: "one", to: b, now: now)
+        let e2 = try Envelope.message(sender: a, text: "two", to: b, now: now)
+        let f1 = try SealedFrame.seal(e1, keys: aKeys, recipient: bKeys.publicKeys)
+        let f2 = try SealedFrame.seal(e2, keys: aKeys, recipient: bKeys.publicKeys)
+        try router.originate(f1, now: now); try router.originate(f2, now: now)
+        // Peer b reports it already holds f1; after marking, only f2 should be offered.
+        router.markKnown(RelayDigest(frameIDs: [f1.id]), for: b, now: now)
+        sentTo.removeAll()
+        router.setPeers([b], now: now)
+        XCTAssertTrue(sentTo.contains { $0 == (f2.id, b) })
+        XCTAssertFalse(sentTo.contains { $0.0 == f1.id })
+        // The device's own digest lists both frames.
+        let digest = router.digest(now: now)
+        XCTAssertTrue(digest.contains(f1.id) && digest.contains(f2.id))
+    }
+    func testRelayDigestBloomHasNoFalseNegatives() throws {
+        let ids = Set((0..<600).map { _ in UUID().uuidString.lowercased() })
+        let digest = try RelayDigest.decode(RelayDigest(frameIDs: ids).encoded())
+        for id in ids { XCTAssertTrue(digest.contains(id)) }  // Bloom filter: never a false negative
+    }
     func testIdentityTagIsStableFourHexFromSigningKey() throws {
         let keys = NodeKeys().publicKeys
         XCTAssertTrue(keys.tag.range(of: "^[0-9A-F]{4}$", options: .regularExpression) != nil)
@@ -574,7 +600,9 @@ final class CoreTests: TestBase {
             ("Nicknames and verified contacts", checks.testNicknamesAndVerifiedPersistAndOverrideUsername),
             ("Encrypted store history and at-rest", checks.testEncryptedStoreKeepsHistoryBeyondDeliveryWindowAndEncryptsAtRest),
             ("Disappearing settings persist", checks.testDisappearingSettingsPersist),
-            ("Relay store protects own/addressed frames", checks.testRelayStoreProtectsOwnAndAddressedFramesWhenClearing)
+            ("Relay store protects own/addressed frames", checks.testRelayStoreProtectsOwnAndAddressedFramesWhenClearing),
+            ("Relay digest skips known frames", checks.testRelayDigestSkipsFramesThePeerAlreadyHas),
+            ("Relay digest Bloom no false negatives", checks.testRelayDigestBloomHasNoFalseNegatives)
         ]
         for (name, test) in tests { try test(); print("PASS: " + name) }
         print("\(tests.count) core checks passed. Physical radio delivery is not covered.")

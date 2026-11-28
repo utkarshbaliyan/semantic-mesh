@@ -21,6 +21,8 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         let profile: ChatProfile; let to: String
         /// Present when the inviter could sign with its pinned keys; `auto` marks background reconnects.
         var time: Int64? = nil; var sig: String? = nil; var auto: Bool? = nil
+        /// A relay-only link: no chat, no contact, carries sealed frames for the mesh only.
+        var relay: Bool? = nil
     }
     private var localProfile: ChatProfile
     /// This device's advertised signing public key (base64), so peers can show our tag before connecting.
@@ -35,6 +37,16 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     /// Latest advertisement per identity; a peer that restarts the app comes back with a new MCPeerID.
     private var found: [String: NearbyPeer] = [:]
     private var usedProofs: Set<String> = []
+    /// Relay-only links to non-contacts (peer → their device id), used to carry sealed frames for the mesh.
+    private var relayLinks: [MCPeerID: (session: MCSession, id: String)] = [:]
+    private let maxRelayPeers = 8
+    /// Per-peer hourly accept budget: at most 200 frames and 5 MB from each relay-only peer.
+    private var relayBudget: [String: (count: Int, bytes: Int, start: Int64)] = [:]
+    /// When true, this device carries frames for any nearby app user, not only friends.
+    var carryForOthers = false
+    var relayConnectionsChanged: ([String]) -> Void = { _ in }
+    var relayLinkOpened: (String) -> Void = { _ in }
+    var incomingRelay: (Data, String) -> Void = { _, _ in }
     /// True for contacts this device can reconnect to automatically (keys pinned).
     var isFriend: (String) -> Bool = { _ in false }
     var signInvite: (_ to: String, _ peerName: String, _ time: Int64) -> String? = { _, _, _ in nil }
@@ -88,7 +100,14 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         current.delegate = nil; current.disconnect(); sessions.removeValue(forKey: peer)
     }
     func start() { active = true; advertiser.startAdvertisingPeer(); browser.startBrowsingForPeers() }
-    func stop() { active = false; found.removeAll(); usedProofs.removeAll(); advertiser.stopAdvertisingPeer(); browser.stopBrowsingForPeers(); transfers.values.forEach { $0.cancel() }; transfers.removeAll(); sessions.values.forEach { $0.delegate = nil; $0.disconnect() }; sessions.removeAll(); approved.removeAll() }
+    func stop() { active = false; found.removeAll(); usedProofs.removeAll(); relayBudget.removeAll(); advertiser.stopAdvertisingPeer(); browser.stopBrowsingForPeers(); transfers.values.forEach { $0.cancel() }; transfers.removeAll(); sessions.values.forEach { $0.delegate = nil; $0.disconnect() }; sessions.removeAll(); relayLinks.values.forEach { $0.session.delegate = nil; $0.session.disconnect() }; relayLinks.removeAll(); approved.removeAll() }
+    /// Enables or disables carrying frames for non-contacts. Turning it off drops all relay-only links.
+    func setCarryForOthers(_ on: Bool) {
+        carryForOthers = on
+        if !on { for (peer, _) in relayLinks { dropRelay(peer) }; relayConnectionsChanged([]) }
+        else { connectRelayPeers() }
+    }
+    func relayPeerIDs() -> [String] { Array(Set(relayLinks.compactMap { $0.value.session.connectedPeers.contains($0.key) ? $0.value.id : nil })) }
     func cancelFiles() { transfers.values.forEach { $0.cancel() }; transfers.removeAll() }
     func sendFile(_ url: URL, name: String, to identity: String) {
         guard active, UUID(uuidString: name) != nil,
@@ -134,6 +153,59 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
             if firstSight && localProfile.id > peer.id { continue }
             invite(peer, automatic: true)
         }
+        connectRelayPeers()
+    }
+    /// Opens relay-only links to nearby non-contacts, up to the peer limit. The lower identity initiates.
+    private func connectRelayPeers() {
+        guard active, carryForOthers else { return }
+        for peer in found.values where !isFriend(peer.id) && sessions[peer.peer] == nil && relayLinks[peer.peer] == nil {
+            guard relayLinks.count < maxRelayPeers else { break }
+            guard localProfile.id < peer.id else { continue }
+            inviteRelay(peer)
+        }
+    }
+    private func inviteRelay(_ peer: NearbyPeer) {
+        guard active, carryForOthers, relayLinks.count < maxRelayPeers, sessions[peer.peer] == nil, relayLinks[peer.peer] == nil,
+              let context = try? JSONEncoder().encode(Request(profile: localProfile, to: peer.id, relay: true)) else { return }
+        let session = makeRelaySession(for: peer.peer, deviceID: peer.id)
+        browser.invitePeer(peer.peer, to: session, withContext: context, timeout: 15)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 18) { [weak self] in
+            guard let self, let link = self.relayLinks[peer.peer], link.session === session, !session.connectedPeers.contains(peer.peer) else { return }
+            self.dropRelay(peer.peer)
+        }
+    }
+    private func makeRelaySession(for peer: MCPeerID, deviceID: String) -> MCSession {
+        relayLinks[peer]?.session.disconnect()
+        let session = MCSession(peer: localPeer, securityIdentity: nil, encryptionPreference: .required)
+        session.delegate = self
+        relayLinks[peer] = (session, deviceID)
+        return session
+    }
+    private func dropRelay(_ peer: MCPeerID) {
+        guard let link = relayLinks[peer] else { return }
+        link.session.delegate = nil; link.session.disconnect(); relayLinks.removeValue(forKey: peer)
+    }
+    /// Periodically drops relay-only links so frames reach a fresh set of carriers.
+    func rotateRelayPeers() {
+        guard active else { return }
+        for (peer, _) in relayLinks { dropRelay(peer) }
+        relayConnectionsChanged([]); connectRelayPeers()
+    }
+    /// Enforces the hourly per-peer accept budget for relay-only traffic.
+    private func relayAllow(_ id: String, bytes: Int) -> Bool {
+        let now = Envelope.now()
+        var budget = relayBudget[id] ?? (0, 0, now)
+        if now - budget.start > 3_600_000 { budget = (0, 0, now) }
+        guard budget.count < 200, budget.bytes + bytes <= 5 * 1024 * 1024 else { relayBudget[id] = budget; return false }
+        budget.count += 1; budget.bytes += bytes; relayBudget[id] = budget; return true
+    }
+    private func handleRelayState(_ peerID: MCPeerID, _ session: MCSession, _ state: MCSessionState) {
+        guard let id = relayLinks[peerID]?.id else { return }
+        if state == .connected {
+            relayConnectionsChanged(relayPeerIDs()); relayLinkOpened(id)
+        } else if state == .notConnected {
+            dropRelay(peerID); relayConnectionsChanged(relayPeerIDs())
+        }
     }
     private func connectedIdentities() -> Set<String> { Set(connectedPeers().compactMap { approved[$0]?.id }) }
     /// Drops links to older MCPeerIDs of the same person, left behind when they restarted the app.
@@ -143,11 +215,17 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         }
     }
     func send(_ data: Data, to identity: String) {
-        guard active, data.count <= Envelope.maxBytes else { return }
-        for peer in connectedPeers() where approved[peer]?.id == identity {
-            guard let session = sessions[peer] else { continue }
-            do { try session.send(data, toPeers: [peer], with: .reliable) }
-            catch { status("Send failed: \(error.localizedDescription)") }
+        guard active else { return }
+        if data.count <= Envelope.maxBytes {
+            for peer in connectedPeers() where approved[peer]?.id == identity {
+                guard let session = sessions[peer] else { continue }
+                do { try session.send(data, toPeers: [peer], with: .reliable) }
+                catch { status("Send failed: \(error.localizedDescription)") }
+            }
+        }
+        // Relay-only peers carry sealed frames and digests only.
+        for (peer, link) in relayLinks where link.id == identity && link.session.connectedPeers.contains(peer) {
+            try? link.session.send(data, toPeers: [peer], with: .reliable)
         }
     }
     private func publishConnections() { connectionChanged(connectedPeers().compactMap { approved[$0] }) }
@@ -184,6 +262,12 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
                 invitationHandler(false, nil); return
             }
             if self.isConnected(peerID) { invitationHandler(false, nil); return }
+            // Relay-only request: accept silently if we're carrying for others and have room, no contact created.
+            if request.relay == true {
+                guard self.carryForOthers, self.sessions[peerID] == nil, self.relayLinks[peerID] == nil,
+                      self.relayLinks.count < self.maxRelayPeers else { invitationHandler(false, nil); return }
+                invitationHandler(true, self.makeRelaySession(for: peerID, deviceID: profile.id)); return
+            }
             // Both sides invited each other at once: the lower identity keeps its own request.
             if self.sessions[peerID] != nil, self.localProfile.id < profile.id { invitationHandler(false, nil); return }
             // A friend's signed reconnect is accepted without asking; each signature works once.
@@ -207,13 +291,16 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
     }
     func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active, self.sessions[peerID] === session else {
+            guard let self, self.active else { return }
+            if let link = self.relayLinks[peerID], link.session === session { self.handleRelayState(peerID, session, state); return }
+            guard self.sessions[peerID] === session else {
                 // A link to a peer this session was not created for is never approved.
-                if state != .notConnected, self?.sessions[peerID] !== session { session.cancelConnectPeer(peerID) }
+                if state != .notConnected { session.cancelConnectPeer(peerID) }
                 return
             }
             guard let profile = self.approved[peerID] else { self.dropSession(for: peerID, ifSame: session); return }
             if state == .connected {
+                self.dropRelay(peerID) // a friend link supersedes any relay-only link to the same peer
                 self.dropStale(profile.id, keeping: peerID)
                 guard self.connected(profile) else { self.dropSession(for: peerID, ifSame: session); self.approved.removeValue(forKey: peerID); self.publishConnections(); return }
                 self.requestChanged(profile.id, false); self.status("Connected: \(profile.label)")
@@ -227,10 +314,15 @@ final class MultipeerTransport: NSObject, MCSessionDelegate, MCNearbyServiceBrow
         }
     }
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard data.count <= Envelope.maxBytes else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.active, self.sessions[peerID] === session, let profile = self.approved[peerID], session.connectedPeers.contains(peerID) else { return }
-            self.incoming(data, profile.id)
+            guard let self, self.active, session.connectedPeers.contains(peerID) else { return }
+            if self.sessions[peerID] === session, let profile = self.approved[peerID], data.count <= Envelope.maxBytes {
+                self.incoming(data, profile.id); return
+            }
+            // Relay-only traffic: capped larger (digests) and rate-limited per peer; only frames/digests flow.
+            if let link = self.relayLinks[peerID], link.session === session, data.count <= 262_144, self.relayAllow(link.id, bytes: data.count) {
+                self.incomingRelay(data, link.id)
+            }
         }
     }
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) { stream.close() }

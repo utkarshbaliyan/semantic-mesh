@@ -228,8 +228,8 @@ struct NetworkBanner: View {
         HStack(spacing: 10) {
             Circle().fill(mesh.running ? Color.green : Color.secondary).frame(width: 10, height: 10)
             VStack(alignment: .leading, spacing: 2) {
-                Text(mesh.running ? "Mesh on" : "Mesh off").font(.subheadline.bold())
-                Text(mesh.running ? "\(mesh.connected.count) connected · carrying \(mesh.relayCarried) for others" : "Turn on to send and receive without internet")
+                Text(mesh.running ? (mesh.stationMode ? "Relay station on" : "Mesh on") : "Mesh off").font(.subheadline.bold())
+                Text(mesh.running ? "\(mesh.connected.count) friend\(mesh.connected.count == 1 ? "" : "s") · \(mesh.relayPeers.count) relay · carrying \(mesh.relayCarried)" : "Turn on to send and receive without internet")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -569,9 +569,17 @@ struct SettingsView: View {
                 } header: { Text("Add people") } footer: { Text("Share your code, or scan/paste someone's, to add them as a verified contact without meeting on the mesh first.") }
                 Section {
                     Toggle("Mesh network", isOn: Binding(get: { mesh.running }, set: { mesh.setMesh($0) }))
-                    LabeledContent("Connected devices", value: "\(mesh.connected.count)")
-                    LabeledContent("Carrying for others", value: "\(mesh.relayCarried)")
+                    LabeledContent("Friends connected", value: "\(mesh.connected.count)")
+                    LabeledContent("Relay peers connected", value: "\(mesh.relayPeers.count)")
+                    LabeledContent("Frames carrying", value: "\(mesh.relayCarried)")
                 } header: { Text("Network") } footer: { Text("Keep Wi-Fi and Bluetooth on and the app open. No internet needed. Text hops across devices; files need a direct connection.") }
+                Section {
+                    Toggle("Help carry messages for others", isOn: Binding(get: { mesh.carryForOthers }, set: { mesh.carryForOthers = $0; mesh.objectWillChange.send() }))
+                    Toggle("Relay station mode", isOn: Binding(get: { mesh.stationMode }, set: { mesh.stationMode = $0; mesh.objectWillChange.send() }))
+                    if mesh.stationMode {
+                        LabeledContent("Frames relayed today", value: "\(mesh.framesRelayedToday)")
+                    }
+                } header: { Text("Carry for others") } footer: { Text("When on, your device connects to any nearby app user to carry their sealed messages onward — it can't read them, and they never become contacts. Relay station mode keeps the screen awake and the mesh running, for a spare device left at a central spot.") }
                 Section {
                     Stepper(value: Binding(get: { mesh.deliveryLifetimeDays }, set: { mesh.deliveryLifetimeDays = $0 }), in: 1...7) {
                         LabeledContent("Keep delivering for", value: "\(mesh.deliveryLifetimeDays) day\(mesh.deliveryLifetimeDays == 1 ? "" : "s")")

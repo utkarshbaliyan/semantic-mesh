@@ -129,6 +129,58 @@ public struct KeyAnnouncement: Codable, Equatable {
     }
 }
 
+/// A compact summary of the frame IDs a device already holds, exchanged when a relay link opens so each
+/// side skips sending frames the other already has. Small sets ship as an explicit list; larger sets use
+/// a Bloom filter (membership test with no false negatives, so we never wrongly skip a needed frame).
+public struct RelayDigest: Codable, Equatable {
+    public static let listThreshold = 500
+    public let v: Int
+    public let kind: String
+    public let ids: [String]?
+    public let bits: Data?
+    public let k: Int?
+    public init(frameIDs: Set<String>) {
+        v = 1; kind = "digest"
+        if frameIDs.count <= Self.listThreshold {
+            ids = frameIDs.sorted(); bits = nil; k = nil
+        } else {
+            let bytes = min(1_000_000, max(1024, frameIDs.count * 10 / 8)) // ~10 bits per element
+            var filter = [UInt8](repeating: 0, count: bytes)
+            let hashes = 5
+            for id in frameIDs { Self.each(id, k: hashes, bits: bytes * 8) { filter[$0 >> 3] |= UInt8(1 << ($0 & 7)) } }
+            ids = nil; bits = Data(filter); k = hashes
+        }
+    }
+    private static func each(_ id: String, k: Int, bits: Int, _ body: (Int) -> Void) {
+        guard bits > 0 else { return }
+        for i in 0..<k {
+            let digest = SHA256.hash(data: Data("\(id)|\(i)".utf8))
+            let value = digest.prefix(8).reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+            body(Int(value % UInt64(bits)))
+        }
+    }
+    public func contains(_ id: String) -> Bool {
+        if let ids { return ids.contains(id) }
+        guard let bits, let k, !bits.isEmpty else { return false }
+        var present = true
+        Self.each(id, k: k, bits: bits.count * 8) { index in if (bits[index >> 3] & UInt8(1 << (index & 7))) == 0 { present = false } }
+        return present
+    }
+    public func encoded() throws -> Data {
+        let data = try JSONEncoder().encode(self)
+        guard data.count <= Envelope.maxBytes * 8 else { throw MeshError.oversize }
+        return data
+    }
+    public static func decode(_ data: Data) throws -> RelayDigest {
+        guard data.count <= Envelope.maxBytes * 8 else { throw MeshError.oversize }
+        let d = try JSONDecoder().decode(RelayDigest.self, from: data)
+        guard d.v == 1, d.kind == "digest" else { throw RelayError.invalidFrame }
+        if let ids = d.ids { guard ids.count <= 5000 else { throw MeshError.oversize } }
+        if let bits = d.bits { guard bits.count <= 1_000_000, (d.k ?? 0) > 0, (d.k ?? 0) <= 16 else { throw RelayError.invalidFrame } }
+        return d
+    }
+}
+
 /// An end-to-end encrypted, signed envelope that any device may carry toward `to`.
 /// Relays see only routing fields; `hops` is the only field they may change.
 public struct SealedFrame: Codable, Equatable {
@@ -257,6 +309,12 @@ public final class RelayRouter {
         flush(now: now); return .carried
     }
     public func carriedCount(now: Int64 = Envelope.now()) -> Int { store.active(now: now).filter { $0.from != local && $0.to != local }.count }
+    /// A summary of the frames this device currently holds, sent to a peer when a link opens.
+    public func digest(now: Int64 = Envelope.now()) -> RelayDigest { RelayDigest(frameIDs: Set(store.active(now: now).map(\.id))) }
+    /// Marks the frames a peer already has (from its digest) as offered, so flush won't resend them.
+    public func markKnown(_ digest: RelayDigest, for peer: String, now: Int64 = Envelope.now()) {
+        for frame in store.active(now: now) where digest.contains(frame.id) { offered[frame.id, default: []].insert(peer) }
+    }
     public func flush(now: Int64 = Envelope.now()) {
         let live = store.active(now: now)
         offered = offered.filter { id, _ in live.contains { $0.id == id } }

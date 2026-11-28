@@ -4,6 +4,7 @@ import AVFoundation
 #if os(iOS)
 import PhotosUI
 import SwiftUI
+import UIKit
 #endif
 
 struct ChatSummary: Identifiable, Equatable {
@@ -64,6 +65,8 @@ final class MeshModel: ObservableObject {
     @Published var player: AVPlayer?
     @Published var showPlayer = false
     @Published var relayCarried = 0
+    @Published var relayPeers: [String] = []
+    @Published var framesRelayedToday = 0
     let identity: String
     private var contactBook: ContactBook?
     private var groupBook: GroupBook?
@@ -77,6 +80,10 @@ final class MeshModel: ObservableObject {
     private var router: RelayRouter?
     private static let relayKinds: Set<String> = ["text", "ack", "group"]
     private var timer: Timer?
+    private var rotationTimer: Timer?
+    #if os(macOS)
+    private var stationActivity: NSObjectProtocol?
+    #endif
     private let recorder = VoiceRecorder()
 
     var selectedContact: ChatProfile? { contacts.first { $0.id == selectedContactID } }
@@ -159,7 +166,7 @@ final class MeshModel: ObservableObject {
             engine.authorizeIncoming = { [weak self] e, peer in self?.authorized(e, from: peer) == true }
             engine.received = { [weak self] _ in self?.refresh() }
             engine.error = { [weak self] error in self?.status(error.localizedDescription) }
-            router?.send = { [weak self] data, peer in self?.transport?.send(data, to: peer) }
+            router?.send = { [weak self] data, peer in guard let self else { return }; self.countRelayed(); self.transport?.send(data, to: peer) }
             router?.keysFor = { [weak self] id in self?.contactBook?.keys(for: id) }
             if keyFallbackNote { status("Secure storage uses a protected key file (the Keychain was unavailable on this build).") }
             refresh()
@@ -448,9 +455,19 @@ final class MeshModel: ObservableObject {
         transport.connectionChanged = { [weak self] peers in
             guard let self else { return }
             self.connected = peers
-            self.router?.setPeers(Set(peers.map(\.id)))
+            self.updateRouterPeers()
             self.sync()
         }
+        transport.carryForOthers = carryForOthers
+        transport.relayConnectionsChanged = { [weak self] ids in
+            guard let self else { return }
+            self.relayPeers = ids; self.updateRouterPeers()
+        }
+        transport.relayLinkOpened = { [weak self] peerID in
+            guard let self, let digest = try? self.router?.digest().encoded() else { return }
+            self.transport?.send(digest, to: peerID)
+        }
+        transport.incomingRelay = { [weak self] data, peerID in self?.receiveRelay(data, from: peerID) }
         transport.requestChanged = { [weak self] id, pending in if pending { self?.pendingRequests.insert(id) } else { self?.pendingRequests.remove(id) } }
         transport.incoming = { [weak self] data, peer in self?.receive(data, from: peer) }
         transport.allowResource = { [weak self] name, peer in self?.attachment(name, from: peer) != nil }
@@ -467,8 +484,18 @@ final class MeshModel: ObservableObject {
         }
         transport.invitation = { [weak self] profile, reply in guard let self, self.invitationReply == nil else { reply(false); return }; self.invitationReply = reply; self.pendingInvitation = profile }
         running = true; transport.start()
+        applyStationMode()
         timer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.sync() }
+        rotationTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in self?.transport?.rotateRelayPeers() }
         status("Nearby discovery started. Friends reconnect automatically when they are nearby with the app open.")
+    }
+    private func updateRouterPeers() {
+        router?.setPeers(Set(connected.map(\.id)).union(relayPeers))
+    }
+    /// Relay-only incoming is restricted to sealed frames and frame digests — never chat, media or key pinning.
+    private func receiveRelay(_ data: Data, from peer: String) {
+        if let digest = try? RelayDigest.decode(data) { router?.markKnown(digest, for: peer); router?.flush(); return }
+        if let frame = try? SealedFrame.decode(data) { relayed(frame, from: peer) }
     }
     /// Whether the mesh should run whenever the app is open. On by default; the Stop button turns it off.
     var meshEnabled: Bool {
@@ -479,8 +506,45 @@ final class MeshModel: ObservableObject {
     func resume() { if meshEnabled { start() } }
     func stop() {
         answerInvitation(false); recorder.cancel(); recording = false; requestingMicrophone = false
-        timer?.invalidate(); timer = nil; transport?.stop(); transport = nil
-        running = false; nearby = []; connected = []; pendingRequests = []; router?.setPeers([])
+        timer?.invalidate(); timer = nil; rotationTimer?.invalidate(); rotationTimer = nil
+        transport?.stop(); transport = nil
+        running = false; nearby = []; connected = []; relayPeers = []; pendingRequests = []; router?.setPeers([])
+        releaseStationMode()
+    }
+
+    // MARK: - Carry for others and relay station mode
+
+    var carryForOthers: Bool {
+        get { UserDefaults.standard.object(forKey: "carryForOthers") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "carryForOthers"); transport?.setCarryForOthers(newValue) }
+    }
+    var stationMode: Bool {
+        get { UserDefaults.standard.bool(forKey: "stationMode") }
+        set { UserDefaults.standard.set(newValue, forKey: "stationMode"); if newValue && !running { setMesh(true) } else { applyStationMode() } }
+    }
+    private func countRelayed() {
+        let today = Int(Envelope.now() / 86_400_000)
+        if UserDefaults.standard.integer(forKey: "relayedDay") != today {
+            UserDefaults.standard.set(today, forKey: "relayedDay"); framesRelayedToday = 0
+        }
+        framesRelayedToday += 1
+    }
+    private func applyStationMode() {
+        let on = stationMode && running
+        #if os(iOS)
+        UIApplication.shared.isIdleTimerDisabled = on
+        #else
+        if on, stationActivity == nil {
+            stationActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .idleDisplaySleepDisabled], reason: "Semantic Mesh relay station")
+        } else if !on { releaseStationMode() }
+        #endif
+    }
+    private func releaseStationMode() {
+        #if os(iOS)
+        UIApplication.shared.isIdleTimerDisabled = false
+        #else
+        if let token = stationActivity { ProcessInfo.processInfo.endActivity(token); stationActivity = nil }
+        #endif
     }
     func invite(_ peer: NearbyPeer) { if !pendingRequests.contains(peer.id) { transport?.invite(peer) } }
     func answerInvitation(_ accept: Bool) { let reply = invitationReply; invitationReply = nil; pendingInvitation = nil; reply?(accept) }

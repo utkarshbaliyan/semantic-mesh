@@ -10,6 +10,8 @@ Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled a
 - **Durable, encrypted storage.** Messages, receipts, relay frames and the contact/group books now live in one SQLite database (`mesh.sqlite`). Message text and frame payloads are encrypted at rest with a key kept in the Keychain (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`); on ad-hoc-signed Mac builds where the Keychain is unavailable it falls back to a protected key file and says so in the log. Existing 0.5 JSON files are migrated once on first launch, then deleted.
 - **Day-long delivery, lasting history.** Chat history is kept until you delete it; queued messages survive app restarts and keep retrying/relaying until delivered or expired. The delivery window is configurable in Settings (default 3 days, up to 7; 5-minute clock-skew tolerance). Per-chat **Disappearing messages** (Off / 24 h / 7 days / 90 days) and **Delete chat** are in Chat info.
 - **Bigger, managed storage.** Media files stay capped at 20 MB each; the total media quota is now 1 GB. The relay cache holds up to 2,000 frames / 50 MB and, when full, evicts the oldest frames carried for others first — never your own undelivered frames or frames addressed to you. Settings → **Storage** shows media and relay-cache usage with buttons to clear each.
+- **Carry for others (opt-in).** Settings → **Help carry messages for others** (on by default) lets your device open *relay-only* links to any nearby app user — no chat, no contact, no prompt. Those links carry only sealed frames (and frame digests); chat, media and key-pinning from them are refused. Each relay-only link is rate-limited (max 200 frames / 5 MB per hour), frames from known senders with bad signatures are dropped, links are capped at 8 at a time and rotate every few minutes so frames spread. When a link opens, each side sends a compact digest (an ID list, or a Bloom filter past 500 frames) so neither resends frames the other already holds.
+- **Relay station mode.** A toggle that keeps the screen awake and the mesh running and shows live counters (friends, relay peers, frames carried, frames relayed today) — for a spare phone or Mac left at a central spot as a permanent carrier. The header and Settings show friends connected, relay peers connected and frames carrying.
 - Version 0.6 uses discovery protocol `chat=4` and does not see 0.5 or earlier devices. Update every device.
 
 ## Version 0.5: multi-hop mesh
@@ -26,7 +28,13 @@ Native SwiftUI app for macOS 14+ and iOS 17+. Keep Wi-Fi and Bluetooth enabled a
 - Relays only use links you already approved with **Request chat**. Strangers' devices do not join automatically yet.
 - v0.5 uses a new discovery version and does not see v0.4 devices. Update every device.
 
-### Test multi-hop with 3 devices
+### Test 0.6 with 3 devices
+
+1. Install 0.6 on Mac, iPhone and iPad; each shows as `@username#TAG`. Add a contact by opening **Settings → My QR code** on one and **Scan a code** on another (or paste the `sm://` link on Mac); the scanned contact shows a blue verified seal. Set a nickname in Chat info and confirm it overrides the username everywhere.
+2. Exchange messages, then close the app on one device for longer than the old one-hour window and reopen it: the history is still there (encrypted at rest). In Chat info set **Disappearing messages** and **Delete chat** and confirm each behaves. In Settings, lower the **delivery window** and watch the Storage counters.
+3. **Relay through a non-contact.** Make the Mac a relay with **Help carry messages for others** on (optionally **Relay station mode**), but do **not** make it a contact of either the iPhone or the iPad. Add the iPhone and iPad to each other by QR, then separate them so they can't see each other directly, each staying near the Mac. Send from the iPhone to the iPad: the Mac's "Frames carrying"/"relayed today" counters move, and the iPad receives the message through the Mac even though the Mac is nobody's contact and can't read it.
+
+### Test multi-hop with 3 devices (0.5 behaviour)
 
 1. Install v0.5 on Mac, iPhone and iPad. Start the network on all three and accept chat requests for every pair (Mac↔iPhone, Mac↔iPad, iPhone↔iPad). The log shows "Mesh keys saved" for each contact.
 2. Quit and reopen the app on iPhone and iPad (this drops their direct link). Start the network on both, then reconnect each **only to the Mac**. Do not reconnect iPhone↔iPad.
