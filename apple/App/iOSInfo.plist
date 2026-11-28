@@ -27,6 +27,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_semantic-mesh._tcp</string>
+		<string>_semantic-mesh._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Semantic Mesh discovers and connects to nearby test devices without internet.</string>

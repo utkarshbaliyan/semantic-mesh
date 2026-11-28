@@ -29,6 +29,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_semantic-mesh._tcp</string>
+		<string>_semantic-mesh._udp</string>
 	</array>
 	<key>NSHighResolutionCapable</key>
 	<true/>
