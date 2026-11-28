@@ -4,13 +4,18 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /** Your username plus the people whose chat requests were accepted. Thread-safe. */
 final class ContactBook {
+    static final int MAX_NICKNAME = 40;
     private final File file;
     private String username;
     private List<ChatProfile> contacts = new ArrayList<>();
+    /** Local-only display names per contact id; never sent to anyone. */
+    private Map<String, String> nicknames = new HashMap<>();
 
     ContactBook(File file, String defaultUsername) throws Exception {
         this.file = file;
@@ -20,10 +25,29 @@ final class ContactBook {
             JSONArray a = j.getJSONArray("contacts");
             if (a.length() > 500) throw new Exception("Contact limit reached.");
             for (int i = 0; i < a.length(); i++) contacts.add(ChatProfile.fromJson(a.getJSONObject(i)));
+            JSONObject n = j.optJSONObject("nicknames");
+            if (n != null) for (java.util.Iterator<String> it = n.keys(); it.hasNext(); ) { String k = it.next(); nicknames.put(k, n.getString(k)); }
+            nicknames.keySet().removeIf(id -> profile(id) == null);
         } else {
             username = ChatProfile.normalize(defaultUsername);
             save(username, contacts);
         }
+    }
+    synchronized String nickname(String id) { return nicknames.get(id); }
+    /** The name shown in the UI: a local nickname if set, otherwise the contact's chosen username. */
+    synchronized String displayName(String id) {
+        String nick = nicknames.get(id);
+        if (nick != null) return nick;
+        ChatProfile p = profile(id);
+        return p != null ? p.username : id.substring(0, Math.min(8, id.length()));
+    }
+    synchronized void setNickname(String id, String raw) throws Exception {
+        if (profile(id) == null) throw new Exception("Unknown contact.");
+        String trimmed = raw == null ? "" : raw.trim();
+        if (trimmed.length() > MAX_NICKNAME) throw new Exception("Nickname too long.");
+        Map<String, String> next = new HashMap<>(nicknames);
+        if (trimmed.isEmpty()) next.remove(id); else next.put(id, trimmed);
+        save(username, contacts, next); nicknames = next;
     }
     synchronized String username() { return username; }
     synchronized List<ChatProfile> contacts() {
@@ -51,9 +75,12 @@ final class ContactBook {
     synchronized boolean allows(Envelope e, String local, String peer) throws Exception {
         return profile(peer) != null && e.sender().equals(peer) && local.equals(e.to()) && !e.sender().equals(local);
     }
-    private void save(String name, List<ChatProfile> list) throws Exception {
+    private void save(String name, List<ChatProfile> list) throws Exception { save(name, list, nicknames); }
+    private void save(String name, List<ChatProfile> list, Map<String, String> nicks) throws Exception {
         JSONArray a = new JSONArray();
         for (ChatProfile c : list) a.put(c.toJson());
-        Storage.writeAtomic(file, new JSONObject().put("username", name).put("contacts", a).toString());
+        JSONObject n = new JSONObject();
+        for (Map.Entry<String, String> e : nicks.entrySet()) n.put(e.getKey(), e.getValue());
+        Storage.writeAtomic(file, new JSONObject().put("username", name).put("contacts", a).put("nicknames", n).toString());
     }
 }

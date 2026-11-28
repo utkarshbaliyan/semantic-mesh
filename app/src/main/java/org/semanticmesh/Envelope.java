@@ -14,7 +14,10 @@ import java.util.regex.Pattern;
 /** Transport-independent v1 envelope. Field names and rules match the Apple app's Envelope. */
 final class Envelope {
     static final int MAX_BYTES = 16384;
-    static final long LIFETIME = 3_600_000;
+    /** Delivery lifetime: configurable, default 3 days, max 7. Matches the Apple app's 0.6 model. */
+    static final long DEFAULT_LIFETIME = 3L * 86_400_000;
+    static final long MAX_LIFETIME = 7L * 86_400_000;
+    static volatile long lifetime = DEFAULT_LIFETIME;
     private static final Pattern UUID_TEXT = Pattern.compile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$");
     final JSONObject json;
 
@@ -29,7 +32,7 @@ final class Envelope {
         if (hops < 0 || hops > 8) throw new Exception("Invalid hops");
         long created = json.getLong("created"), expires = json.getLong("expires");
         if (expires <= created) throw new Exception("Invalid expiry");
-        if (created < 0 || expires - created > LIFETIME || created > now + 300_000) throw new Exception("Invalid lifetime or clock skew");
+        if (created < 0 || expires - created > MAX_LIFETIME || created > now + 300_000) throw new Exception("Invalid lifetime or clock skew");
         if (json.has("to")) uuid(json.getString("to"));
         if (json.has("groupID")) {
             uuid(json.getString("groupID"));
@@ -65,7 +68,7 @@ final class Envelope {
     private static JSONObject base(String sender, String kind, String to) throws JSONException {
         long now = System.currentTimeMillis();
         JSONObject j = new JSONObject().put("v", 1).put("id", UUID.randomUUID().toString()).put("sender", sender)
-            .put("kind", kind).put("created", now).put("expires", now + LIFETIME).put("hops", 0);
+            .put("kind", kind).put("created", now).put("expires", now + lifetime).put("hops", 0);
         if (to != null) j.put("to", to);
         return j;
     }

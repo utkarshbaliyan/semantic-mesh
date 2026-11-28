@@ -37,4 +37,14 @@ public class EnvelopeTest {
         j.put("created",1).put("expires",2);
         assertTrue(new Envelope(j).expired());
     }
+    @Test public void defaultLifetimeIsThreeDays() throws Exception {
+        JSONObject j=Envelope.create(sender,"hello",null,null).json;
+        assertEquals(Envelope.DEFAULT_LIFETIME, j.getLong("expires")-j.getLong("created"));
+    }
+    @Test public void rejectsLifetimeBeyondSevenDays() throws Exception {
+        JSONObject j=Envelope.create(sender,"hello",null,null).json;
+        long created=System.currentTimeMillis();
+        j.put("created",created).put("expires",created+Envelope.MAX_LIFETIME+1);
+        try { new Envelope(j); fail("accepted over-long lifetime"); } catch(Exception expected) { assertEquals("Invalid lifetime or clock skew",expected.getMessage()); }
+    }
 }
