@@ -17,6 +17,10 @@ struct ChatSummary: Identifiable, Equatable {
 
 final class MeshModel: ObservableObject {
     @Published var chatList: [ChatSummary] = []
+    /// View state lives here: plain swiftc builds (build-mac.sh) cannot load SwiftUI's @State macro plugin.
+    @Published var panel: Panel?
+    @Published var showPhotos = false
+    @Published var recordingStarted = Date()
     @Published var chatSearch = ""
     @Published var draft = ""
     @Published var search = ""
@@ -378,7 +382,7 @@ final class MeshModel: ObservableObject {
                     case .failure(let error): self.status(error.localizedDescription)
                     }
                 }
-                self.recording = true; self.status("Recording voice message, up to 2 minutes. Tap Send recording when finished.")
+                self.recording = true; self.recordingStarted = Date(); self.status("Recording voice message, up to 2 minutes. Tap Send recording when finished.")
             } catch { self.recorder.cancel(); self.status(error.localizedDescription) }
         }
     }

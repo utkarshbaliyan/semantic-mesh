@@ -29,13 +29,12 @@ enum Panel: String, Identifiable { case settings, nearby, chatInfo, groupEditor;
 /// Chat list beside the open chat on Mac and iPad; collapses to a push navigation stack on iPhone.
 struct RootView: View {
     @ObservedObject var mesh: MeshModel
-    @State private var panel: Panel?
     var body: some View {
         NavigationSplitView {
-            ChatListView(mesh: mesh, panel: $panel)
+            ChatListView(mesh: mesh, panel: $mesh.panel)
                 .navigationSplitViewColumnWidth(min: 280, ideal: 330)
         } detail: {
-            if mesh.selectedChatKey != nil { ConversationView(mesh: mesh, panel: $panel) }
+            if mesh.selectedChatKey != nil { ConversationView(mesh: mesh, panel: $mesh.panel) }
             else {
                 ContentUnavailableView("Select a chat", systemImage: "bubble.left.and.bubble.right",
                                        description: Text("Find people nearby, then chat without internet."))
@@ -45,16 +44,16 @@ struct RootView: View {
             Button("Accept") { mesh.answerInvitation(true) }
             Button("Reject", role: .cancel) { mesh.answerInvitation(false) }
         } message: { Text("\(mesh.pendingInvitation?.label ?? "Nearby user") wants to chat. Confirm their device ID in person.") }
-        .sheet(item: $panel, onDismiss: { if mesh.showGroupEditor && panel == nil { mesh.showGroupEditor = false } }) { item in
+        .sheet(item: $mesh.panel, onDismiss: { if mesh.showGroupEditor && mesh.panel == nil { mesh.showGroupEditor = false } }) { item in
             switch item {
-            case .settings: SettingsView(mesh: mesh, panel: $panel)
-            case .nearby: NearbyView(mesh: mesh, panel: $panel)
-            case .chatInfo: ChatInfoView(mesh: mesh, panel: $panel)
+            case .settings: SettingsView(mesh: mesh, panel: $mesh.panel)
+            case .nearby: NearbyView(mesh: mesh, panel: $mesh.panel)
+            case .chatInfo: ChatInfoView(mesh: mesh, panel: $mesh.panel)
             case .groupEditor: GroupEditor(mesh: mesh)
             }
         }
         .onChange(of: mesh.showGroupEditor) { _, open in
-            if open { panel = .groupEditor } else if panel == .groupEditor { panel = nil }
+            if open { mesh.panel = .groupEditor } else if mesh.panel == .groupEditor { mesh.panel = nil }
         }
         .sheet(isPresented: $mesh.showPlayer, onDismiss: { mesh.endPlayback() }) {
             VStack {
@@ -239,8 +238,6 @@ struct Bubble: View {
 /// Every chat gets the same composer: attachments, emoji, text, and voice recording.
 struct Composer: View {
     @ObservedObject var mesh: MeshModel
-    @State private var recordStart = Date()
-    @State private var showPhotos = false
     private let emojis = ["😀", "😂", "😍", "🥰", "😎", "🤔", "😢", "😡", "👍", "👎", "🙏", "👏", "🎉", "❤️", "🔥", "✅"]
     private var busy: Bool { !mesh.canCompose || mesh.requestingMicrophone || mesh.preparingMedia }
     private var trimmed: String { mesh.draft.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -250,8 +247,8 @@ struct Composer: View {
             if mesh.recording {
                 HStack(spacing: 12) {
                     Image(systemName: "record.circle").foregroundStyle(.red).symbolEffect(.pulse)
-                    TimelineView(.periodic(from: recordStart, by: 1)) { context in
-                        let seconds = max(0, Int(context.date.timeIntervalSince(recordStart)))
+                    TimelineView(.periodic(from: mesh.recordingStarted, by: 1)) { context in
+                        let seconds = max(0, Int(context.date.timeIntervalSince(mesh.recordingStarted)))
                         Text(String(format: "%d:%02d / 2:00", seconds / 60, seconds % 60)).monospacedDigit()
                     }
                     Spacer()
@@ -266,7 +263,7 @@ struct Composer: View {
                         Button { mesh.chooseMedia("audio") } label: { Label("Audio file", systemImage: "music.note") }
                         Button { mesh.chooseMedia("video") } label: { Label("Video file", systemImage: "film") }
                         #if os(iOS)
-                        Button { showPhotos = true } label: { Label("Video from Photos", systemImage: "photo.on.rectangle") }
+                        Button { mesh.showPhotos = true } label: { Label("Video from Photos", systemImage: "photo.on.rectangle") }
                         #endif
                     } label: { Image(systemName: "plus.circle.fill").font(.title2) }
                         .disabled(busy).accessibilityLabel("Attach")
@@ -294,9 +291,8 @@ struct Composer: View {
         .buttonStyle(.borderless)
         .padding(10)
         .background(.bar)
-        .onChange(of: mesh.recording) { _, on in if on { recordStart = Date() } }
         #if os(iOS)
-        .photosPicker(isPresented: $showPhotos, selection: $mesh.pickedVideo, matching: .videos)
+        .photosPicker(isPresented: $mesh.showPhotos, selection: $mesh.pickedVideo, matching: .videos)
         .onChange(of: mesh.pickedVideo) { _, item in
             guard let item else { return }
             mesh.preparingMedia = true
